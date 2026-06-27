@@ -1,0 +1,22 @@
+# Placeholder project config. No secrets or API keys belong in this file.
+# Actual keys (e.g. ODDS_API_KEY) go in a local .env file, which is gitignored.
+
+project:
+  name: OddsOptimizer
+  sport: mlb
+  market: pitcher_strikeouts
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+odds_api:
+  base_url: https://api.the-odds-api.com/v4
+  sport_key: baseball_mlb
+  market_key: pitcher_strikeouts
+  regions: us
+  # api_key: set via environment variable ODDS_API_KEY, not here
+
+model:
+  type: poisson_regression
+  target: predicted_strikeouts
