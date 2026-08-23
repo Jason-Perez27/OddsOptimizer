@@ -93,14 +93,15 @@ for this date once games start.
 
 ---
 
-## Step 3 — Schedule the unattended daily/weekly loop (four tasks)
+## Step 3 — Schedule the unattended daily/weekly loop (five tasks)
 
 | # | Cadence | Command | Recommended time | Why that time |
 |---|---|---|---|---|
 | A | Daily | `python -m src.pipeline.refresh` | ~10:00 **ET** | After Underdog posts lines + StatsAPI has probables, before nearly all first pitches. |
 | B | Daily | `python -m src.pipeline.settle --window-days 4` | ~12:00 **ET** | After overnight Statcast finalizes the prior day(s); re-settles the trailing window, resolving `pending` → `settled`/`void`. |
 | C | Weekly (Mon) | `python -m scripts.run_backtest --start <2026 opening week> --end <yesterday> --through-date <yesterday> --fit-only` | ~08:00 **ET** | Keeps the model current as the season evolves; beats the 7-day staleness warning. |
-| D | Weekly (Mon, after B) | `python -m src.backtest.report` | ~12:30 **ET** | Regenerates the live Track-B results report from the accumulated settled partitions. |
+| D | Weekly (Mon, after B) | `python -m src.backtest.report` | ~12:30 **ET** | Regenerates the live Track-B results report from the accumulated settled partitions, including the CLV section. |
+| E | Daily, **repeating** | `python -m src.data.underdog_ticks` | 09:00–24:00 **ET**, every 20 min | Captures line movement through the day, including every first pitch on the slate (times can spread 5–6 hours) — a single morning poll can't see the close. |
 
 **Times are ET-anchored** (MLB's reference clock). Your scheduled tasks fire
 in **your machine's local timezone** — convert these ET times to your local
@@ -111,6 +112,16 @@ after overnight Statcast settles; D must fire after B.
 If you already have a daily "refresh" scheduled task, that is cadence A —
 confirm it points at the command above (no flags needed; it loads the model
 from the now-correct canonical path automatically).
+
+**Cadence E (2026-08, CLV feature) is different in kind from A–D**, not just
+in schedule: it's a *repeating* trigger (`schtasks /RI 20 /DU 0015:00` — see
+`scripts/install_cadences.ps1`, which had to be extended to support a
+repeating trigger at all), it has no ordering dependency on A/B/C/D, and it
+is **purely additive** — it never touches `line_picks.csv`, the predictions
+partition, or the frozen morning snapshot, and never triggers a refresh.
+Skipping cadence E costs you nothing except CLV data for the day; it cannot
+corrupt or interact with any of the other four cadences' outputs. See the
+README's "Closing line value (CLV)" subsection for what it's for.
 
 ---
 
@@ -128,6 +139,11 @@ from the now-correct canonical path automatically).
   per tier **and** evidence the current probability-only definition is
   failing (e.g. High not separating from Low). Until both hold, the shipped
   tier definition stands — do not redefine tiers off an early read.
+- **CLV (2026-08) is readable sooner than outcome-based ROI.** It's a
+  continuous quantity measured on every pick regardless of outcome, so it
+  doesn't wait on settlement lag or a 100-per-tier floor the way ROI does.
+  Like Track B, it starts empty and accumulates forward from whenever
+  cadence E was first turned on — there is no backfilled history.
 
 ---
 
@@ -144,6 +160,7 @@ from the now-correct canonical path automatically).
 | `void_scratched` settlement status | Pitcher never threw a pitch (true scratch/postponement) after the 3-day max wait. | Correctly excluded from grading — not scored as a loss. |
 | Pitcher pulled early but did throw | This is a legitimate graded `under`, **not** a void. | None — only a never-thrown start voids. |
 | Verification gate FAIL (Step 0) on a game day | A live source's shape changed (Underdog `sport_id`/parser, or StatsAPI hydration). | **Stop.** Fix the relevant `src/data/` module and re-verify before running any graded `refresh`. |
+| A day's tick log is missing or thin (`data/raw/underdog_ticks/game_date=.../ticks.csv` absent, or few rows) | Cadence E didn't run (not yet scheduled, or a gap in its repeating trigger). | Not a failure of A–D — nothing else depends on cadence E. That day just contributes no CLV; `close_quality` will read `stale` (or the market simply won't appear in the CLV report) for any picks it does resolve. Confirm cadence E is registered (`schtasks /Query /TN "OddsOptimizer\E-ticks"`) and re-check tomorrow. |
 
 ---
 
@@ -153,7 +170,9 @@ from the now-correct canonical path automatically).
 - A 2026-season production model sits at `data/models/baseline_model.joblib`
   with a small `model_age_days` (staleness warning silent).
 - Today's predictions partition exists, written by a real `refresh`.
-- The four scheduled tasks above are running on cadence.
+- The five scheduled tasks above are running on cadence (cadence E is
+  optional in the sense that nothing else depends on it, but is needed for
+  CLV to accumulate).
 - ~2 weeks in: Low-tier line picks should be approaching/past 100 settled —
   first point at which ROI is worth reading, not before.
 - Tier redefinition: gated on ≥100 settled/tier **and** evidence of failure
@@ -169,8 +188,11 @@ Per the approved spec, the following are named and deferred, not built:
 - A run-health/status dashboard over the manifests.
 - Retries/alerting infrastructure beyond what the pipeline already does
   (partial-failure degrade, manifest flags).
-- Model v2, new features, tier redefinition, prop expansion, a priced-odds/
-  CLV feed, or a live game-status feed to shorten the pending→void wait.
+- Model v2, new features, tier redefinition, prop expansion, or a live
+  game-status feed to shorten the pending→void wait.
+  (A priced-odds/CLV feed — cadence E, `src/data/underdog_ticks.py` /
+  `src/evaluation/clv.py` — was in this original list but has since been
+  built; see the CLV row in Step 3 and the README's CLV subsection.)
 
 The existing CLIs and their manifests are the interface; your task scheduler
 is the orchestrator.

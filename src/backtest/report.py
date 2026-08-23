@@ -43,9 +43,12 @@ import pandas as pd
 
 from src.backtest import roi
 from src.backtest.walk_forward import _oos_columns, melt_oos_sweep
-from src.evaluation import metrics
+from src.data.underdog_ticks import DEFAULT_TICKS_ROOT, TICK_COLUMNS
+from src.evaluation import clv, metrics
 from src.models.baseline_model import THRESHOLDS
 from src.pipeline.settle import GRADED_LINE_PICKS_COLUMNS, GRADED_THRESHOLD_SWEEP_COLUMNS
+from src.predictions.tiering import LINE_PICKS_COLUMNS
+from src.props import DEFAULT_PROP
 
 DEFAULT_PROCESSED_DIR = os.path.join("data", "processed")
 DEFAULT_REPORTS_DIR = "reports"
@@ -93,6 +96,148 @@ def load_graded_frames(processed_dir: str = DEFAULT_PROCESSED_DIR, game_dates: l
     picks = pd.concat(picks_frames, ignore_index=True) if picks_frames else pd.DataFrame(columns=GRADED_LINE_PICKS_COLUMNS)
     sweep = pd.concat(sweep_frames, ignore_index=True) if sweep_frames else pd.DataFrame(columns=GRADED_THRESHOLD_SWEEP_COLUMNS)
     return picks, sweep
+
+
+# ---------------------------------------------------------------------------
+# CLV section loading (2026-08 CLV feature) -- read-only over the tick log
+# (src.data.underdog_ticks, cadence E) and the already-written line_picks.csv
+# partitions. Additive: never writes line_picks.csv, the predictions
+# partition, or the frozen morning snapshot, and never triggers a refresh or
+# a poll -- purely reads what those cadences have already produced.
+# ---------------------------------------------------------------------------
+
+def discover_tick_dates(ticks_root: str = DEFAULT_TICKS_ROOT) -> list:
+    """Sorted list of game_date strings with a written tick log."""
+    if not os.path.isdir(ticks_root):
+        return []
+    dates = []
+    for name in os.listdir(ticks_root):
+        if name.startswith("game_date="):
+            dates.append(name[len("game_date="):])
+    return sorted(dates)
+
+
+def load_ticks_frame(game_date: str, ticks_root: str = DEFAULT_TICKS_ROOT) -> pd.DataFrame:
+    """Read one game date's ticks.csv, or an empty (correctly-columned) frame if absent."""
+    path = os.path.join(ticks_root, f"game_date={game_date}", "ticks.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=TICK_COLUMNS)
+    return pd.read_csv(path)
+
+
+def load_line_picks_frame(game_date: str, processed_dir: str = DEFAULT_PROCESSED_DIR,
+                           prop: str = None) -> pd.DataFrame:
+    """Read one date's already-written line_picks.csv, or an empty frame if absent. Never writes."""
+    effective_prop = prop or DEFAULT_PROP
+    base = os.path.join(processed_dir, "predictions", f"game_date={game_date}")
+    part_dir = base if effective_prop == DEFAULT_PROP else os.path.join(base, f"prop={effective_prop}")
+    path = os.path.join(part_dir, "line_picks.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=LINE_PICKS_COLUMNS)
+    return pd.read_csv(path)
+
+
+def build_clv_section(
+    processed_dir: str = DEFAULT_PROCESSED_DIR,
+    ticks_root: str = DEFAULT_TICKS_ROOT,
+    game_dates: list = None,
+    prop: str = None,
+) -> dict:
+    """
+    Assemble the cumulative CLV summary across every discovered tick-log
+    date (or just `game_dates`): resolve each date's close from its tick
+    log, join to that date's line_picks.csv, and combine all dates' per-pick
+    CLV rows before summarizing -- so `clv_summary`'s n's are cumulative
+    across the whole forward-accumulated record, matching the rest of this
+    report's cumulative-metrics convention (spec section 3: "no separate
+    rolling ledger").
+
+    A date contributes nothing (not an error) when its tick log is empty, no
+    line_picks.csv exists for it yet, or no tick ever resolves to a pre-game
+    close -- this is expected for the tick log's very first days (it starts
+    empty and accumulates forward; see README) and for any off-day.
+    """
+    dates = game_dates if game_dates is not None else discover_tick_dates(ticks_root)
+    clv_frames = []
+    for game_date in dates:
+        ticks = load_ticks_frame(game_date, ticks_root)
+        if ticks.empty:
+            continue
+        picks = load_line_picks_frame(game_date, processed_dir, prop=prop)
+        if picks.empty:
+            continue
+        closing = clv.resolve_closing_lines(ticks)
+        if closing.empty:
+            continue
+        day_clv = clv.compute_clv(picks, closing)
+        if not day_clv.empty:
+            clv_frames.append(day_clv)
+
+    combined = pd.concat(clv_frames, ignore_index=True) if clv_frames else pd.DataFrame(columns=clv.CLV_COLUMNS)
+    return clv.clv_summary(combined)
+
+
+CLV_CAVEAT = (
+    "Underdog is a DFS pick'em operator, not a sportsbook -- its lines move partly on its own "
+    "customer exposure/liability management, not purely on new information, so CLV measured "
+    "here is weaker evidence of model sharpness than CLV against a sharp two-way sportsbook "
+    "would be. `src/data/vegas.py`'s ESPN closing odds cover game totals and moneylines only "
+    "(no player props), so they cannot serve as a sharper CLV benchmark for pitcher K props."
+)
+
+
+def render_clv_markdown(clv_report: dict) -> list:
+    """Render `build_clv_section()`'s output as a list of markdown lines (a report section)."""
+    lines = ["", "## Closing line value (CLV)", "", CLV_CAVEAT, ""]
+
+    if clv_report["n_total"] == 0:
+        lines += [
+            "No resolved closes yet. The tick log (`data/raw/underdog_ticks/`, cadence E) starts "
+            "empty and only accumulates forward -- there is no backfilled historical CLV (see README).",
+            "",
+        ]
+        return lines
+
+    overall = clv_report["overall"]
+    lines += [
+        f"Picks with a resolved close: {overall['n']} (of {clv_report['n_total']} total; "
+        f"{clv_report['n_stale_excluded']} stale close(s) excluded)",
+        f"Market agreed with the pick: {_fmt(overall['pct_market_agreed']['value'], pct=True)} "
+        f"(n={overall['pct_market_agreed']['n']})",
+        f"Mean price move toward the lean (line-unchanged picks only): "
+        f"{_fmt(overall['mean_price_move_toward_lean']['value'])} "
+        f"(n={overall['mean_price_move_toward_lean']['n']})",
+        f"Mean absolute line move: {_fmt(overall['mean_abs_line_move']['value'])} "
+        f"(n={overall['mean_abs_line_move']['n']})",
+        "",
+    ]
+
+    def _table(title, bucket_label, buckets: dict):
+        out = [f"### {title}", "",
+               f"| {bucket_label} | n | market agreed | mean price move | mean abs line move |",
+               "|---|---|---|---|---|"]
+        for key, stats in sorted(buckets.items()):
+            out.append(
+                f"| {key} | {stats['n']} | "
+                f"{_fmt(stats['pct_market_agreed']['value'], pct=True)} (n={stats['pct_market_agreed']['n']}) | "
+                f"{_fmt(stats['mean_price_move_toward_lean']['value'])} "
+                f"(n={stats['mean_price_move_toward_lean']['n']}) | "
+                f"{_fmt(stats['mean_abs_line_move']['value'])} (n={stats['mean_abs_line_move']['n']}) |"
+            )
+        out.append("")
+        return out
+
+    lines += _table("By tier", "tier", clv_report["by_tier"])
+    lines += _table("By actionability", "actionability", clv_report["by_actionability"])
+    if clv_report["by_edge_quartile"]:
+        lines += [
+            f"_By |edge at open| quartile -- {clv_report['n_edge_unknown_excluded_from_quartiles']} "
+            f"pick(s) with no market at open excluded from bucketing:_",
+            "",
+        ]
+        lines += _table("By |edge at open| quartile", "quartile", clv_report["by_edge_quartile"])
+
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +299,15 @@ def _fmt(x, pct=False, decimals=3):
     return f"{x:.{decimals}f}"
 
 
-def render_markdown(report: dict, as_of_date: str) -> str:
-    """Render `build_report()`'s output as a markdown document."""
+def render_markdown(report: dict, as_of_date: str, clv_report: dict = None) -> str:
+    """
+    Render `build_report()`'s output as a markdown document. When
+    `clv_report` (a `build_clv_section()` / `clv.clv_summary()` dict) is
+    given, appends a "## Closing line value (CLV)" section -- see
+    `render_clv_markdown`. `clv_report=None` (the default) renders exactly
+    as before this feature existed, so any caller not yet passing one keeps
+    working unchanged.
+    """
     hr = report["hit_rate"]
     rr = report["flat_bet_roi"]
 
@@ -203,6 +355,8 @@ def render_markdown(report: dict, as_of_date: str) -> str:
         "confidence-tier cutoffs based on a small sample.",
         "",
     ]
+    if clv_report is not None:
+        lines += render_clv_markdown(clv_report)
     return "\n".join(lines)
 
 
@@ -257,15 +411,25 @@ def generate_report(
     rolling_window: int = DEFAULT_ROLLING_WINDOW,
     n_buckets: int = DEFAULT_N_BUCKETS,
     as_of: str = None,
+    ticks_root: str = DEFAULT_TICKS_ROOT,
+    include_clv: bool = True,
 ) -> dict:
     """
     Load every settled partition (or just `game_dates`), build the report,
     and write `{reports_dir}/{as_of}-results.md` plus
     `{as_of}-reliability.png` / `{as_of}-cumulative-roi.png`.
+
+    `include_clv=True` (default) additionally builds the CLV section from
+    the tick log (`ticks_root`, cadence E) and appends it to the same
+    results.md -- read-only over data/raw/underdog_ticks/ and each date's
+    already-written line_picks.csv; never writes either. Set False to skip
+    it (e.g. in a test that hasn't set up a tick log fixture).
     """
     as_of = as_of or date.today().isoformat()
     picks, sweep = load_graded_frames(processed_dir, game_dates)
     report = build_report(picks, sweep, rolling_window=rolling_window, n_buckets=n_buckets)
+
+    clv_report = build_clv_section(processed_dir, ticks_root, game_dates) if include_clv else None
 
     os.makedirs(reports_dir, exist_ok=True)
     reliability_path = os.path.join(reports_dir, f"{as_of}-reliability.png")
@@ -273,7 +437,7 @@ def generate_report(
     plot_reliability_diagram(report["reliability_table"], reliability_path)
     plot_cumulative_roi(report["time_series"], roi_path)
 
-    md = render_markdown(report, as_of)
+    md = render_markdown(report, as_of, clv_report=clv_report)
     report_path = os.path.join(reports_dir, f"{as_of}-results.md")
     with open(report_path, "w") as f:
         f.write(md)
@@ -283,6 +447,7 @@ def generate_report(
         "reliability_plot_path": reliability_path,
         "roi_plot_path": roi_path,
         "report": report,
+        "clv_report": clv_report,
     }
 
 

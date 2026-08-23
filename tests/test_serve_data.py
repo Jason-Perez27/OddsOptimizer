@@ -202,3 +202,73 @@ def test_load_slate_prop_walks_missing_partition_raises(tmp_path):
     _write_partition(str(tmp_path))  # only the strikeouts flat partition
     with pytest.raises(FileNotFoundError):
         slate_data.load_slate(str(tmp_path), "2026-06-29", prop="walks")
+
+
+# ---------------------------------------------------------------------------
+# CLV surfacing (2026-08 CLV feature): only for a PAST date with a resolved
+# close; never for today's (or a future) in-progress slate.
+# ---------------------------------------------------------------------------
+
+def _write_ticks(ticks_root, game_date, rows):
+    part = os.path.join(ticks_root, f"game_date={game_date}")
+    os.makedirs(part, exist_ok=True)
+    pd.DataFrame(rows).to_csv(os.path.join(part, "ticks.csv"), index=False)
+
+
+def _tick(poll_at, start_time, over_american, under_american, live_event=False, game_status="scheduled"):
+    return {
+        "poll_at": poll_at, "over_under_id": "ou-ace", "projection_id": "p1",
+        "player_id": "pid-ace", "pitcher": "Ace One", "stat_type": "strikeouts",
+        "line": 5.5, "over_american": over_american, "under_american": under_american,
+        "over_payout_multiplier": 0.71, "under_payout_multiplier": 1.18,
+        "p_over_implied": None, "p_under_implied": None, "p_market": None,
+        "over_updated_at": poll_at, "under_updated_at": poll_at,
+        "game_id": "m-ace", "game_title": "NYY @ BOS", "start_time": start_time,
+        "game_status": game_status, "live_event": live_event, "status": "active",
+    }
+
+
+def test_load_slate_attaches_clv_for_a_past_date_with_resolved_close(tmp_path):
+    _write_partition(str(tmp_path), "2026-06-29")
+    ticks_root = os.path.join(str(tmp_path), "ticks")
+    _write_ticks(ticks_root, "2026-06-29", [
+        _tick("2026-06-29T13:00:00+00:00", "2026-06-29T18:35:00Z", -140.0, 118.0),
+        _tick("2026-06-29T18:00:00+00:00", "2026-06-29T18:35:00Z", -155.0, 130.0),
+    ])
+
+    slate = slate_data.load_slate(
+        str(tmp_path), "2026-06-29", ticks_root=ticks_root, today_date="2026-06-30",
+    )
+    ace = next(p for p in slate["pitchers"] if p["pitcher"] == 1)
+
+    assert ace["line"]["line_move"] == pytest.approx(0.0)
+    assert ace["line"]["market_agreed"] in ("toward", "against", "unchanged")
+    assert ace["line"]["close_quality"] in ("good", "stale")
+
+
+def test_load_slate_never_attaches_clv_for_todays_slate(tmp_path):
+    _write_partition(str(tmp_path), "2026-06-29")
+    ticks_root = os.path.join(str(tmp_path), "ticks")
+    # Even with a fully resolvable close available in the tick log...
+    _write_ticks(ticks_root, "2026-06-29", [
+        _tick("2026-06-29T13:00:00+00:00", "2026-06-29T18:35:00Z", -140.0, 118.0),
+        _tick("2026-06-29T18:00:00+00:00", "2026-06-29T18:35:00Z", -155.0, 130.0),
+    ])
+
+    # ...today_date == game_date means this IS "today's" partition -- frozen open only.
+    slate = slate_data.load_slate(
+        str(tmp_path), "2026-06-29", ticks_root=ticks_root, today_date="2026-06-29",
+    )
+    ace = next(p for p in slate["pitchers"] if p["pitcher"] == 1)
+
+    assert ace["line"]["line_move"] is None
+    assert ace["line"]["market_agreed"] is None
+    assert ace["line"]["close_quality"] is None
+
+
+def test_load_slate_no_clv_fields_when_no_tick_log_exists(tmp_path):
+    _write_partition(str(tmp_path), "2026-06-29")
+    slate = slate_data.load_slate(str(tmp_path), "2026-06-29", today_date="2026-06-30")
+    ace = next(p for p in slate["pitchers"] if p["pitcher"] == 1)
+    assert ace["line"]["line_move"] is None
+    assert ace["line"]["market_agreed"] is None

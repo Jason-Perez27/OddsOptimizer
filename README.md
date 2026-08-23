@@ -96,7 +96,8 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 
 ### `src/data/` — ingestion
 
-- **`underdog_lines.py`** — the live line source. `fetch_over_under_lines(sport_id="MLB")` calls Underdog's public pick'em feed; `flatten_lines(payload, stat, sport_id)` joins the nested `over_under_lines → appearances → players + games` payload into one row per line with both sides' American odds and payout multipliers; `american_to_prob`, `no_vig_two_way`, and `payout_to_decimal` are the shared odds-conversion helpers used downstream for market pricing. Feeds the tiering/edge stage of `src/pipeline/refresh.py`.
+- **`underdog_lines.py`** — the live line source. `fetch_over_under_lines(sport_id="MLB")` calls Underdog's public pick'em feed; `flatten_lines(payload, stat, sport_id)` joins the nested `over_under_lines → appearances → players + games` payload into one row per line with both sides' American odds, payout multipliers, and each side's own `updated_at` timestamp; `american_to_prob`, `no_vig_two_way`, and `payout_to_decimal` are the shared odds-conversion helpers used downstream for market pricing. Feeds the tiering/edge stage of `src/pipeline/refresh.py`, and (via its `updated_at` fields) the tick log below.
+- **`underdog_ticks.py`** (2026-08, CLV feature) — the overnight/pre-game tick log. `poll_once()` calls `fetch_over_under_lines` exactly once per invocation, fans out to every stat in `MLB_PITCHER_STATS` locally, and appends only genuinely NEW rows (deduped on each line's `(over_under_id, over_updated_at, under_updated_at)`) to `data/raw/underdog_ticks/game_date=YYYY-MM-DD/ticks.csv` — partitioned by the GAME's US-Eastern calendar date (derived from `start_time`), never the poll date. Purely additive: never touches `line_picks.csv`, the predictions partition, or the frozen morning snapshot, and never triggers a refresh. Feeds `src/evaluation/clv.py`.
 - **`pitcher_logs.py`** — pulls a pitcher's season-to-date Statcast pitch logs via `pybaseball` (`get_pitcher_season_logs`, plus an id-based `get_pitcher_logs_by_id` used for settlement). Raw output feeds `src/features/game_logs.py`.
 - **`probable_pitchers.py`** — fetches today's probable starters from MLB-StatsAPI (`fetch_schedule` + `parse_probable_starters`), answering "who's starting, for which team, against whom." Its slate output is the direct input to `src/features/predict_features.py`.
 - **`statsapi_boxscore.py`** — pulls earned-runs-allowed labels from the StatsAPI boxscore (`get_pitcher_earned_runs_by_game`), since Statcast pitch data doesn't distinguish earned from unearned runs. Feeds the ER-rate rolling features.
@@ -133,6 +134,7 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 
 - **`grading.py`** — pure join/grading logic, matched on `(pitcher, game_pk)` (doubleheader-safe, never on date alone): assigns 3-way settlement status and grades both the single pick and the full threshold sweep against the realized outcome.
 - **`metrics.py`** — model-honesty metrics on graded frames: reliability tables and expected calibration error, Brier/log-loss at a line or across thresholds, PIT histograms for discrete-count calibration, and point accuracy (MAE/RMSE). Feeds both backtest reports.
+- **`clv.py`** (2026-08, CLV feature) — reads `underdog_ticks.py`'s tick log. `resolve_closing_lines()` picks each market's last genuinely pre-game tick (before first pitch, not live) as its close, flagging a capture more than 60 minutes out as `stale`. `compute_clv()` joins that close back to the day's `line_picks.csv` and computes `line_move` / `market_agreed` — never blending a probability across a line move (see the CLV subsection below). `clv_summary()` reports `pct_market_agreed`, mean price move, and mean line move, each with its `n`, broken out by tier/actionability/edge quartile.
 
 ### `src/backtest/` — historical validation and pick-profitability
 
@@ -142,22 +144,36 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 - **`tail_calibration.py`** — diagnoses "projection compression" (systematic under-prediction at the high end, hidden by aggregate metrics) via μ-decile tables. Used by the feature-gate scripts to decide whether a candidate feature set actually fixes it.
 - **`vif_prune.py`** — variance-inflation-factor computation and iterative backward-elimination pruning, for de-collinearizing candidate regressor sets before they're adopted.
 - **`conviction.py`** — a manual calibration helper that scans for an ROI-optimal conviction/no-action cutoff per confidence tier; not yet wired into the automated pipeline, pending ≥100 settled picks per tier.
-- **`report.py`** — generates both the Track B (live pick-profitability) and Track A (historical backtest) markdown reports plus the reliability/calibration/error-over-time PNG charts referenced in Results above.
+- **`report.py`** — generates both the Track B (live pick-profitability) and Track A (historical backtest) markdown reports plus the reliability/calibration/error-over-time PNG charts referenced in Results above, plus (2026-08) a CLV section built from `src/evaluation/clv.py` — read-only over the tick log and each date's already-written `line_picks.csv`.
 
 ### `src/serve/` — the local dashboard
 
-- **`data.py`** — pure, read-only data-access layer: `load_slate` joins one date's predictions/threshold_table/line_picks/pitcher_cards/manifest into a single JSON-serializable dict, including KPIs like `n_with_line`, `n_no_line`, and `median_vig`.
+- **`data.py`** — pure, read-only data-access layer: `load_slate` joins one date's predictions/threshold_table/line_picks/pitcher_cards/manifest into a single JSON-serializable dict, including KPIs like `n_with_line`, `n_no_line`, and `median_vig`. (2026-08) For a **past** `game_date` only, each pitcher's `line` also carries `line_move` / `market_agreed` / `close_quality` when that date's tick log resolves a close; today's (or any future) partition never gets these fields, by construction — the decision view always shows the frozen morning open, never a moving line.
 - **`server.py`** / **`static/`** — a zero-dependency stdlib `http.server` serving the dashboard UI and a small JSON API (`/api/dates`, `/api/slate`). Purely a presentation layer over `data.py`; never triggers a refresh or writes anything.
 
 ### `scripts/` — operational tooling
 
 - **`run_backtest.py`** — end-to-end historical backtest runner (`corpus` → `build_features` → `walk_forward` → `report`), and the `--fit-only` path used to retrain and save the live production model on a cadence.
-- **`run_cadence.py`** — the thin wrapper an OS scheduler calls for the four cadences (refresh/settle/retrain/report), logging output and distinguishing a clean off-day skip from a real failure.
+- **`run_cadence.py`** — the thin wrapper an OS scheduler calls for the five cadences (refresh/settle/retrain/report/**ticks**), logging output and distinguishing a clean off-day skip from a real failure.
 - **`run_compression_fix_gate.py`** / **`run_compression_fix_v2_gate.py`** — walk-forward gates that test a candidate feature-set change against the production baseline and adopt/reject it by a fixed rule (see the rejected compression-fix result in Results above).
 - **`compare_skill_features.py`** — a similar gate for a plate-discipline candidate feature set, with an AST-based tool to promote accepted columns into `baseline_model.py` automatically.
-- **`install_cadences.ps1`** — registers the four cadences above in Windows Task Scheduler.
+- **`install_cadences.ps1`** — registers the five cadences above in Windows Task Scheduler; cadence E (`ticks`) is a *repeating* trigger (`-RepeatInterval`/`-Duration`, every 20 minutes for 15 hours) rather than a fire-once one, since a tick log needs many polls across a day to capture line movement.
 - **`diagnose_live_sources.py`** — one-off triage tool for `refresh --dry-run` failures; `diagnose_underdog()` hits the raw Underdog feed and prints HTTP status, MLB game count, distinct stats present, and a full sample line, `diagnose_statsapi()` does the same for the StatsAPI schedule.
 - **`generate_daily_html.py`** — renders `pitcher_cards.csv` + `line_picks.csv` into a static `daily_results.html` card view: two-sided prices and no-vig market probability per pitcher (`_market_price_tag`), edge labeled against the market (falling back to vs-coinflip when a line wasn't matched), and an actionable/no-action badge driven by `tiering.py`'s actual `actionability` values (`lean_over`/`lean_under`/`no_action`).
+
+### Closing line value (CLV) — 2026-08
+
+**What it is.** Cadence E (`scripts/run_cadence.py ticks`, `src/data/underdog_ticks.py`) polls Underdog's live feed every 20 minutes through the day and appends only genuinely new price ticks — deduped on each line's own `(over_under_id, over_updated_at, under_updated_at)` — to `data/raw/underdog_ticks/game_date=YYYY-MM-DD/ticks.csv`. `src/evaluation/clv.py` then resolves each market's **close** (its last tick before first pitch, before the game goes live) and compares it to that day's already-picked, already-frozen **open** (`line_picks.csv`) to compute CLV: whether the line and/or price moved *toward* or *against* the pick after it was made.
+
+**"Closing" is per game, not per slate.** First-pitch times on one day's slate can spread 5–6 hours; a line's close is resolved off *that market's own* `start_time`, never a single slate-wide cutoff.
+
+**Never blended across a line move.** When the line itself moves (e.g. 5.5 → 6.5), the open and close no-vig market probabilities price *different events* and are not comparable — `compute_clv` never averages or reprices across that move (and never uses the model's own predicted distribution to do so either, which would let the model being validated contaminate its own validation metric). `market_agreed` falls back to the *direction* of the line move instead; the price-based `price_move_toward_lean` metric is only ever computed on the subset of picks where the line stayed put.
+
+**Why CLV, not just outcome-based ROI, is the primary validation signal here:** a normal day's slate carries on the order of ~26 strikeout lines. Outcome-based ROI needs on the order of 100+ settled picks *per tier* before it's worth reading (see the go-live runbook) — inside one partial season, that's underpowered for anything but the lowest tier. CLV is a *continuous* quantity measured on **every** pick regardless of how the game turns out (no win/loss needed, no settlement lag), so it converges to a meaningful sample far faster than a binary hit/miss record can. It doesn't replace the ROI backtest — it's an earlier, denser signal available while the outcome-based record is still too thin to read.
+
+**Honest caveat.** Underdog is a DFS pick'em operator, not a sportsbook — its lines move partly on its own customer exposure/liability management, not purely on new information. CLV measured against Underdog is therefore *weaker* evidence of model sharpness than CLV against a sharp two-way sportsbook would be. `src/data/vegas.py`'s ESPN closing odds (game totals and moneylines) don't cover player props, so they can't serve as a sharper benchmark for pitcher strikeout lines either — that's a documented gap, not a silently-assumed one.
+
+**No backfill.** The tick log starts empty on the day cadence E is first turned on and only accumulates forward, exactly like Track B's outcome-based record — there is no historical Underdog tick data to seed it from. Every report and dashboard view says so explicitly rather than implying a longer history exists.
 
 ## Status
 
@@ -167,8 +183,9 @@ The pipeline is built and running end-to-end, not in planning:
 - **Backtest:** a 4,268-start walk-forward backtest validates model calibration (Track A — see Results above); the automated compression-fix and skill-feature gates let candidate feature sets be tested and adopted/rejected against it.
 - **Live pipeline:** a daily pre-game refresh (`src/pipeline/refresh.py`) pulls today's slate, Underdog lines, and context features, and writes predictions/threshold sweeps/line picks with a live-source verification gate (`--dry-run`) ahead of it.
 - **Outcome tracking:** daily settlement (`src/pipeline/settle.py`) grades picks against realized Statcast outcomes and accumulates the forward-only Track B pick-profitability record.
+- **CLV (2026-08):** cadence E polls Underdog every 20 minutes and appends genuinely new ticks to a purely-additive log (`data/raw/underdog_ticks/`); `src/evaluation/clv.py` resolves each market's close and computes CLV against the frozen morning pick, surfaced in `src/backtest/report.py`'s CLV section and, for past dates only, the dashboard. Starts empty and accumulates forward — see the CLV subsection above for why it's the primary validation signal ahead of outcome-based ROI.
 - **Dashboard:** a local, read-only decision dashboard (`run_dashboard.py`) renders the latest slate — probability ladder, market pricing, and workload stats — without ever triggering a refresh itself.
-- **Tests:** a network-free unit test suite (523 tests, run against hand-built fixtures — no live network calls) covering ingestion, feature engineering, tiering/edge calculation, the pipeline, grading, and the backtest.
+- **Tests:** a network-free unit test suite (550 tests, run against hand-built fixtures — no live network calls) covering ingestion, feature engineering, tiering/edge calculation, the pipeline, grading, the backtest, and CLV.
 
 Not yet built (see `docs/runbook_go_live.md`'s "What this runbook deliberately does not include"): a run-health/status dashboard, retry/alerting infrastructure beyond the pipeline's existing partial-failure degrade, and tier-cutoff redefinition (gated on ≥100 settled picks per tier).
 

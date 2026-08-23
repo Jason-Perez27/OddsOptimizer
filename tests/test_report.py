@@ -322,6 +322,122 @@ def test_generate_report_with_no_partitions_still_writes_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# CLV section (2026-08 CLV feature) -- read-only over data/raw/underdog_ticks/
+# and each date's already-written line_picks.csv; never writes either.
+# ---------------------------------------------------------------------------
+
+def _write_ticks_csv(ticks_root, game_date, rows):
+    part_dir = os.path.join(ticks_root, f"game_date={game_date}")
+    os.makedirs(part_dir, exist_ok=True)
+    pd.DataFrame(rows, columns=report.TICK_COLUMNS).to_csv(
+        os.path.join(part_dir, "ticks.csv"), index=False,
+    )
+
+
+def _write_line_picks_csv(processed_dir, game_date, rows):
+    part_dir = os.path.join(processed_dir, "predictions", f"game_date={game_date}")
+    os.makedirs(part_dir, exist_ok=True)
+    pd.DataFrame(rows, columns=report.LINE_PICKS_COLUMNS).to_csv(
+        os.path.join(part_dir, "line_picks.csv"), index=False,
+    )
+
+
+def _tick_row(poll_at, start_time, over_american=-148, under_american=124,
+              live_event=False, game_status="scheduled"):
+    return {
+        "poll_at": poll_at, "over_under_id": "ou-1", "projection_id": "line-1",
+        "player_id": "p-1", "pitcher": "Gerrit Cole", "stat_type": "strikeouts",
+        "line": 6.5, "over_american": over_american, "under_american": under_american,
+        "over_payout_multiplier": 0.68, "under_payout_multiplier": 1.24,
+        "p_over_implied": None, "p_under_implied": None, "p_market": None,
+        "over_updated_at": poll_at, "under_updated_at": poll_at,
+        "game_id": "m-1", "game_title": "NYY @ BOS", "start_time": start_time,
+        "game_status": game_status, "live_event": live_event, "status": "active",
+    }
+
+
+def _line_pick_row(game_date):
+    return {
+        "pitcher": 543037, "game_pk": 1001, "pitcher_name": "Gerrit Cole", "team": "NYY",
+        "start_time": "2026-08-23T23:05:00+00:00", "line": 6.5, "line_threshold": 7,
+        "p_over": 0.55, "p_under": 0.45, "tier": "medium", "lean": "over",
+        "edge": 0.03, "edge_vs_coinflip": 0.05, "push_mass": 0.0,
+        "projection_id": "line-1", "pulled_at": f"{game_date}T14:00:00+00:00",
+        "over_american": -148, "under_american": 124,
+        "over_payout_multiplier": 0.68, "under_payout_multiplier": 1.24,
+        "p_over_implied": 0.6, "p_under_implied": 0.45, "vig": 0.05, "p_market": 0.57,
+        "p_over_lo": 0.50, "p_over_hi": 0.60, "conviction": 1.5, "actionability": "lean_over",
+    }
+
+
+def test_build_clv_section_empty_when_no_tick_log(tmp_path):
+    processed_dir = os.path.join(str(tmp_path), "processed")
+    ticks_root = os.path.join(str(tmp_path), "ticks")
+    result = report.build_clv_section(processed_dir=processed_dir, ticks_root=ticks_root)
+    assert result["n_total"] == 0
+    assert result["by_tier"] == {}
+
+
+def test_build_clv_section_combines_across_dates(tmp_path):
+    processed_dir = os.path.join(str(tmp_path), "processed")
+    ticks_root = os.path.join(str(tmp_path), "ticks")
+
+    _write_ticks_csv(ticks_root, "2026-08-23", [
+        _tick_row("2026-08-23T14:00:00+00:00", "2026-08-23T23:05:00+00:00", -148, 124),
+        _tick_row("2026-08-23T22:30:00+00:00", "2026-08-23T23:05:00+00:00", -160, 138),
+    ])
+    _write_line_picks_csv(processed_dir, "2026-08-23", [_line_pick_row("2026-08-23")])
+
+    result = report.build_clv_section(processed_dir=processed_dir, ticks_root=ticks_root)
+
+    assert result["n_total"] == 1
+    assert result["overall"]["n"] == 1
+
+
+def test_render_clv_markdown_includes_honest_caveat_and_no_close_message():
+    empty = report.clv.clv_summary(pd.DataFrame())
+    lines = report.render_clv_markdown(empty)
+    text = "\n".join(lines)
+    assert "Closing line value (CLV)" in text
+    assert "DFS pick'em operator" in text
+    assert "No resolved closes yet" in text
+
+
+def test_generate_report_appends_clv_section_when_tick_log_present(tmp_path):
+    processed_dir = os.path.join(str(tmp_path), "processed")
+    reports_dir = os.path.join(str(tmp_path), "reports")
+    ticks_root = os.path.join(str(tmp_path), "ticks")
+
+    _write_ticks_csv(ticks_root, "2026-08-23", [
+        _tick_row("2026-08-23T14:00:00+00:00", "2026-08-23T23:05:00+00:00", -148, 124),
+        _tick_row("2026-08-23T22:30:00+00:00", "2026-08-23T23:05:00+00:00", -160, 138),
+    ])
+    _write_line_picks_csv(processed_dir, "2026-08-23", [_line_pick_row("2026-08-23")])
+
+    result = report.generate_report(
+        processed_dir=processed_dir, reports_dir=reports_dir, ticks_root=ticks_root, as_of="2026-08-24",
+    )
+
+    assert result["clv_report"]["n_total"] == 1
+    with open(result["report_path"]) as f:
+        content = f.read()
+    assert "Closing line value (CLV)" in content
+
+
+def test_generate_report_include_clv_false_skips_the_section(tmp_path):
+    processed_dir = os.path.join(str(tmp_path), "processed")
+    reports_dir = os.path.join(str(tmp_path), "reports")
+
+    result = report.generate_report(
+        processed_dir=processed_dir, reports_dir=reports_dir, as_of="2026-06-21", include_clv=False,
+    )
+    assert result["clv_report"] is None
+    with open(result["report_path"]) as f:
+        content = f.read()
+    assert "Closing line value (CLV)" not in content
+
+
+# ---------------------------------------------------------------------------
 # Historical backtest report (task #11 step 6, testing item #13)
 # ---------------------------------------------------------------------------
 #

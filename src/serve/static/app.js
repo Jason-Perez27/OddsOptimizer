@@ -243,6 +243,19 @@ function renderDetail() {
       <span class="chip ${p.line.tier || "low"}">tier ${p.line.tier || "—"}</span>
       <span class="chip ${actCls}" title="conviction = |p_over−market| / sd(p_over) · thresholds provisional">${actLabel} · cv ${cvVal}</span>
       <span class="chip muted" style="font-size:11px" title="P(over) at mu±eta_se bounds">P band [${pLo}, ${pHi}]</span>`;
+
+    // CLV (2026-08 CLV feature): only present at all for a PAST date whose
+    // close resolved -- see src/serve/data.py's load_slate CLV paragraph.
+    // Today's (or any future) partition never carries these fields, so this
+    // chip simply never renders on the live decision view.
+    if (p.line.market_agreed != null) {
+      const agreedLabel = { toward: "toward pick", against: "against pick", unchanged: "unchanged" }[p.line.market_agreed] || p.line.market_agreed;
+      const agreedCls = p.line.market_agreed === "toward" ? "over" : (p.line.market_agreed === "against" ? "under" : "muted");
+      const moveTxt = p.line.line_move != null ? signed(p.line.line_move) : "—";
+      const staleTxt = p.line.close_quality === "stale" ? " · stale close" : "";
+      lineChips += `
+      <span class="chip ${agreedCls}" title="CLV: line_move = close − open; market_agreed derived from the line-move direction (or the price move when the line didn't move) — see README">CLV: line ${moveTxt}, market ${agreedLabel}${staleTxt}</span>`;
+    }
   }
 
   box.innerHTML = `

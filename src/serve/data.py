@@ -17,16 +17,34 @@ are kept with `line: null`, never dropped. Each pitcher with a line carries its
 two-sided market prices and no-vig market probability (`p_market`) so the UI
 can show edge measured against the market, not a fixed 50% coinflip (2026-08
 Underdog migration -- see src/predictions/tiering.py).
+
+CLV (2026-08 CLV feature): for a PAST game_date only (strictly before
+`today_date`), each pitcher's `line` dict additionally carries `line_move` /
+`market_agreed` / `close_quality` when that date's tick log resolves a close
+(src/evaluation/clv.py) -- still read-only, still never triggers a refresh
+or a poll. TODAY's (or any future) partition never gets these fields
+populated, by construction, regardless of how much the tick log has
+captured so far: the decision view shows the frozen morning open, never a
+moving line (decision log, 2026-06-29). This does pull in
+src.evaluation.clv, which (via src.predictions.tiering) transitively
+imports `requests` -- a pure library import, no network I/O at import time,
+so the "loads instantly" design goal above still holds in practice even
+though the literal "NO ... network imports" phrasing is now looser than it
+used to be.
 """
 
 import json
 import math
 import os
 import statistics
+from datetime import date
 
 import pandas as pd
 
+from src.evaluation import clv as clv_mod
+
 PREDICTIONS_DIR = "predictions"
+DEFAULT_TICKS_ROOT = os.path.join("data", "raw", "underdog_ticks")
 
 # Importing here to avoid circular imports -- data.py must stay model-import-free.
 # We only need the DEFAULT_PROP string constant, not the full registry.
@@ -113,12 +131,17 @@ def _diag_records(part_dir, filename):
     return [_row_to_dict(r) for _, r in df.iterrows()]
 
 
-def load_slate(processed_dir, game_date, prop=None):
+def load_slate(processed_dir, game_date, prop=None, ticks_root=DEFAULT_TICKS_ROOT, today_date=None):
     """
     Assemble the slate dict for one game_date (and optionally a prop).
     Raises FileNotFoundError if the partition doesn't exist (the caller maps
     that to a 404). `prop` defaults to the default prop ("strikeouts") which
     reads from the flat game_date=*/ path for backward compatibility.
+
+    `today_date` (injectable; defaults to real `date.today()`) is the CLV
+    cutoff: CLV fields are attached to each pitcher's `line` dict only when
+    `game_date < today_date` -- i.e. never for today's (or a future) date's
+    partition. See the module docstring's CLV paragraph.
     """
     part_dir = _partition_dir(processed_dir, game_date, prop)
     if not os.path.isdir(part_dir):
@@ -164,7 +187,28 @@ def load_slate(processed_dir, game_date, prop=None):
                 "p_over_hi": _clean(r.get("p_over_hi")),
                 "conviction": _clean(r.get("conviction")),
                 "actionability": _clean(r.get("actionability")),
+                # CLV fields (2026-08 CLV feature): populated below ONLY for a
+                # past game_date with a resolved close. Left null here so a
+                # partition with no tick log (or today's in-progress slate)
+                # renders identically to before this feature existed.
+                "line_move": None,
+                "market_agreed": None,
+                "close_quality": None,
             }
+
+    _today = today_date or date.today().isoformat()
+    if game_date < _today and not line_picks.empty:
+        ticks = _read_csv(os.path.join(ticks_root, f"game_date={game_date}", "ticks.csv"))
+        if not ticks.empty:
+            closing = clv_mod.resolve_closing_lines(ticks)
+            if not closing.empty:
+                clv_df = clv_mod.compute_clv(line_picks, closing)
+                for _, r in clv_df.iterrows():
+                    key = (r["pitcher"], r["game_pk"])
+                    if key in lines:
+                        lines[key]["line_move"] = _clean(r.get("line_move"))
+                        lines[key]["market_agreed"] = _clean(r.get("market_agreed"))
+                        lines[key]["close_quality"] = _clean(r.get("close_quality"))
 
     stats = {}
     if not cards.empty:
