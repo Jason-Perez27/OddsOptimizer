@@ -70,6 +70,7 @@ If `refresh` reports fewer games than you expect early in the day, that's normal
 
 ```
 OddsOptimizer/
+├── .github/workflows/  # tick-poller.yml — cloud-hosted cadence E (GitHub Actions), see below
 ├── configs/            # config.yaml — Underdog feed config, prop thresholds, evaluation settings
 ├── data/                # gitignored — raw/ pulls, processed/ predictions+outcomes partitions, models/
 ├── docs/                # data sources, decision log, operator runbooks, design/ (dated design specs)
@@ -154,16 +155,16 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 ### `scripts/` — operational tooling
 
 - **`run_backtest.py`** — end-to-end historical backtest runner (`corpus` → `build_features` → `walk_forward` → `report`), and the `--fit-only` path used to retrain and save the live production model on a cadence.
-- **`run_cadence.py`** — the thin wrapper an OS scheduler calls for the five cadences (refresh/settle/retrain/report/**ticks**), logging output and distinguishing a clean off-day skip from a real failure.
+- **`run_cadence.py`** — the thin wrapper an OS scheduler calls for cadences A–D (refresh/settle/retrain/report), logging output and distinguishing a clean off-day skip from a real failure. Also still supports **`ticks`** (cadence E) for manual/local runs and testing, though scheduled execution of `ticks` has moved to GitHub Actions — see below.
 - **`run_compression_fix_gate.py`** / **`run_compression_fix_v2_gate.py`** — walk-forward gates that test a candidate feature-set change against the production baseline and adopt/reject it by a fixed rule (see the rejected compression-fix result in Results above).
 - **`compare_skill_features.py`** — a similar gate for a plate-discipline candidate feature set, with an AST-based tool to promote accepted columns into `baseline_model.py` automatically.
-- **`install_cadences.ps1`** — registers the five cadences above in Windows Task Scheduler; cadence E (`ticks`) is a *repeating* trigger (`-RepeatInterval`/`-Duration`, every 20 minutes for 15 hours) rather than a fire-once one, since a tick log needs many polls across a day to capture line movement.
+- **`install_cadences.ps1`** — registers cadences A–D in Windows Task Scheduler. Cadence E (the tick poller) is deliberately **not** registered here (2026-08) — it runs on GitHub Actions instead, see `.github/workflows/tick-poller.yml` below.
 - **`diagnose_live_sources.py`** — one-off triage tool for `refresh --dry-run` failures; `diagnose_underdog()` hits the raw Underdog feed and prints HTTP status, MLB game count, distinct stats present, and a full sample line, `diagnose_statsapi()` does the same for the StatsAPI schedule.
 - **`generate_daily_html.py`** — renders `pitcher_cards.csv` + `line_picks.csv` into a static `daily_results.html` card view: two-sided prices and no-vig market probability per pitcher (`_market_price_tag`), edge labeled against the market (falling back to vs-coinflip when a line wasn't matched), and an actionable/no-action badge driven by `tiering.py`'s actual `actionability` values (`lean_over`/`lean_under`/`no_action`).
 
 ### Closing line value (CLV) — 2026-08
 
-**What it is.** Cadence E (`scripts/run_cadence.py ticks`, `src/data/underdog_ticks.py`) polls Underdog's live feed every 20 minutes through the day and appends only genuinely new price ticks — deduped on each line's own `(over_under_id, over_updated_at, under_updated_at)` — to `data/raw/underdog_ticks/game_date=YYYY-MM-DD/ticks.csv`. `src/evaluation/clv.py` then resolves each market's **close** (its last tick before first pitch, before the game goes live) and compares it to that day's already-picked, already-frozen **open** (`line_picks.csv`) to compute CLV: whether the line and/or price moved *toward* or *against* the pick after it was made.
+**What it is.** Cadence E (`src/data/underdog_ticks.py`, cloud-hosted since 2026-08 — see the subsection below) polls Underdog's live feed every 15 minutes through the day and appends only genuinely new price ticks — deduped on each line's own `(over_under_id, over_updated_at, under_updated_at)` — to `data/raw/underdog_ticks/game_date=YYYY-MM-DD/ticks.csv`. `src/evaluation/clv.py` then resolves each market's **close** (its last tick before first pitch, before the game goes live) and compares it to that day's already-picked, already-frozen **open** (`line_picks.csv`) to compute CLV: whether the line and/or price moved *toward* or *against* the pick after it was made.
 
 **"Closing" is per game, not per slate.** First-pitch times on one day's slate can spread 5–6 hours; a line's close is resolved off *that market's own* `start_time`, never a single slate-wide cutoff.
 
@@ -175,6 +176,58 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 
 **No backfill.** The tick log starts empty on the day cadence E is first turned on and only accumulates forward, exactly like Track B's outcome-based record — there is no historical Underdog tick data to seed it from. Every report and dashboard view says so explicitly rather than implying a longer history exists.
 
+### Cadence E on GitHub Actions — 2026-08
+
+Cadence E (the tick poller) moved off the local machine and onto GitHub
+Actions (`.github/workflows/tick-poller.yml`) so line collection keeps
+running when the laptop is closed. Cadences A–D stayed local. The
+reasoning and the operational tradeoffs, documented honestly rather than
+glossed over:
+
+- **Why only cadence E moved.** It's the only unbackfillable data in this
+  pipeline. Statcast, boxscores, probable pitchers, and ESPN odds can all
+  be retrieved days later — `settle --window-days 4` already backfills
+  four days of Statcast, and retrain (C) / report (D) are weekly. A line
+  movement that was never observed, by contrast, is gone permanently.
+  That's the entire reason E moved and A–D didn't.
+- **Actions cron is best-effort, not a fixed-interval clock.** GitHub
+  documents scheduled workflows as delayed 15–60 minutes under platform
+  load, with some queued runs dropped entirely. The tick log is therefore
+  a **good-faith sample of the market**, not a guaranteed evenly-spaced
+  time series — never assume a given cron tick actually produced a poll.
+  `close_quality = "stale"` in `src/evaluation/clv.py` exists precisely so
+  CLV analysis can exclude poorly-captured closes (the last tick observed
+  more than an hour before first pitch) instead of silently averaging in
+  a low-quality read. **Any CLV summary should report how many closes it
+  excluded as stale, not just the number it scored.**
+- **The workflow auto-disables after 60 days with no commits to `main`.**
+  This is expected, acceptable behavior once the MLB season ends and
+  `main` goes quiet for the offseason — GitHub disables idle scheduled
+  workflows by design. There is deliberately **no keepalive workflow or
+  bot-commit hack** to defeat it; that would just be a second thing that
+  can silently break. Re-enable it (or push a real commit to `main`) when
+  polling needs to resume.
+- **Repository visibility affects cost.** GitHub Actions minutes are
+  unlimited on a public repo but capped at 2,000 free minutes/month on a
+  private one. At 15-minute polling this job runs ~64 times/day at ~45s
+  each — roughly 48 min/day, ~1,450 min/month — which would nearly exhaust
+  a private repo's free tier by itself. If the repo is private, either
+  make it public or widen the cron interval to 30 minutes.
+- **A missed local refresh is more recoverable now.** Because the cloud
+  poller captures lines all day regardless of whether cadence A ran, a
+  missed or late `refresh` is no longer a total loss for that date — the
+  line history still exists on the `data-ticks` branch and predictions
+  can, if needed, be reconstructed offline afterward. Any such
+  reconstruction **must** grade against the tick nearest the *original*
+  decision time, never a later one — grading against a later tick breaks
+  the frozen-snapshot discipline and makes the backtest dishonest, since
+  it would score a decision against information that wasn't available
+  when the decision was supposed to be made.
+
+Setup, verification, and the full local/cloud data-flow (bootstrapping the
+`data-ticks` branch, confirming the schedule actually fires, pulling cloud
+ticks down for local analysis) are in `docs/runbook_go_live.md`, Step 3a/3b.
+
 ## Status
 
 The pipeline is built and running end-to-end, not in planning:
@@ -183,9 +236,9 @@ The pipeline is built and running end-to-end, not in planning:
 - **Backtest:** a 4,268-start walk-forward backtest validates model calibration (Track A — see Results above); the automated compression-fix and skill-feature gates let candidate feature sets be tested and adopted/rejected against it.
 - **Live pipeline:** a daily pre-game refresh (`src/pipeline/refresh.py`) pulls today's slate, Underdog lines, and context features, and writes predictions/threshold sweeps/line picks with a live-source verification gate (`--dry-run`) ahead of it.
 - **Outcome tracking:** daily settlement (`src/pipeline/settle.py`) grades picks against realized Statcast outcomes and accumulates the forward-only Track B pick-profitability record.
-- **CLV (2026-08):** cadence E polls Underdog every 20 minutes and appends genuinely new ticks to a purely-additive log (`data/raw/underdog_ticks/`); `src/evaluation/clv.py` resolves each market's close and computes CLV against the frozen morning pick, surfaced in `src/backtest/report.py`'s CLV section and, for past dates only, the dashboard. Starts empty and accumulates forward — see the CLV subsection above for why it's the primary validation signal ahead of outcome-based ROI.
+- **CLV (2026-08):** cadence E — now cloud-hosted on GitHub Actions, polling Underdog every 15 minutes — appends genuinely new ticks to a purely-additive log (`data/raw/underdog_ticks/`, or the `data-ticks` branch upstream); `src/evaluation/clv.py` resolves each market's close and computes CLV against the frozen morning pick, surfaced in `src/backtest/report.py`'s CLV section and, for past dates only, the dashboard. Starts empty and accumulates forward — see the CLV subsection above for why it's the primary validation signal ahead of outcome-based ROI, and the "Cadence E on GitHub Actions" subsection for the cloud-hosting tradeoffs.
 - **Dashboard:** a local, read-only decision dashboard (`run_dashboard.py`) renders the latest slate — probability ladder, market pricing, and workload stats — without ever triggering a refresh itself.
-- **Tests:** a network-free unit test suite (550 tests, run against hand-built fixtures — no live network calls) covering ingestion, feature engineering, tiering/edge calculation, the pipeline, grading, the backtest, and CLV.
+- **Tests:** a network-free unit test suite (556 tests, run against hand-built fixtures — no live network calls) covering ingestion, feature engineering, tiering/edge calculation, the pipeline, grading, the backtest, and CLV (including the tick poller's bounded-retry/backoff and poll-time-after-fetch hardening).
 
 Not yet built (see `docs/runbook_go_live.md`'s "What this runbook deliberately does not include"): a run-health/status dashboard, retry/alerting infrastructure beyond the pipeline's existing partial-failure degrade, and tier-cutoff redefinition (gated on ≥100 settled picks per tier).
 
