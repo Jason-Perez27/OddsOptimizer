@@ -24,7 +24,11 @@ Join path:
 Each over_under_line has exactly TWO entries in `options`, distinguished by
 `choice` == "higher" / "lower". Each option carries: american_price (string,
 e.g. "-148"), decimal_price, payout_multiplier (string, e.g. "0.89"),
-status, selection_header (player name), selection_subheader.
+status, selection_header (player name), selection_subheader, and its own
+`updated_at` timestamp (2026-08 tick-log addition -- src/data/underdog_ticks.py
+uses each side's updated_at for change detection/dedup; see that module's
+docstring). A price move is visible as a NEW updated_at on one or both
+sides, never as a full-snapshot diff.
 
 Line-level fields: id, over_under_id, stat_value (the line, string),
 line_type (always "balanced" in this feed -- no ladder to collapse), live_event
@@ -94,6 +98,7 @@ FLATTEN_COLUMNS = [
     "stat_type", "line", "line_type",
     "over_american", "under_american", "over_decimal", "under_decimal",
     "over_payout_multiplier", "under_payout_multiplier", "over_status", "under_status",
+    "over_updated_at", "under_updated_at",
     "game_id", "game_title", "away_team", "home_team", "start_time",
     "game_status", "live_event", "status",
 ]
@@ -171,6 +176,8 @@ def flatten_lines(payload: dict, stat: str = DEFAULT_STAT, sport_id: str = DEFAU
             "under_payout_multiplier": under_opt.get("payout_multiplier"),
             "over_status":             over_opt.get("status"),
             "under_status":            under_opt.get("status"),
+            "over_updated_at":         over_opt.get("updated_at"),
+            "under_updated_at":        under_opt.get("updated_at"),
             "game_id":                 match_id,
             "game_title":              game_title,
             "away_team":               away_team,

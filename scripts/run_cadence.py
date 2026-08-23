@@ -17,11 +17,19 @@ Why this exists (spec: docs/design/specs/2026-06-29-cadence-automation-design.md
   across four task definitions).
 
 This module adds NO business logic and never re-runs refresh itself — it runs
-exactly the one named action. The four cadences are:
+exactly the one named action. The five cadences are:
   A  refresh   python -m src.pipeline.refresh
   B  settle    python -m src.pipeline.settle --window-days 4
   C  retrain   python scripts/run_backtest.py --fit-only
   D  report    python -m src.backtest.report
+  E  ticks     python -m src.data.underdog_ticks
+
+Cadence E (2026-08, CLV feature) is purely additive: it appends genuinely new
+Underdog price ticks to data/raw/underdog_ticks/ and never touches
+line_picks.csv, the predictions partition, or the frozen morning snapshot.
+Unlike A-D it repeats through the day (see scripts/install_cadences.ps1's
+-RepeatInterval) rather than firing once — a single tick log needs many polls
+across an evening/day to actually capture line movement.
 
 Design: dependency-injected `runner` so tests call dispatch() with a fake
 runner and never invoke a real CLI or touch the network. The CLI path at the
@@ -45,6 +53,7 @@ _CADENCE_ARGV: dict[str, list[str]] = {
     "settle":  [sys.executable, "-m", "src.pipeline.settle", "--window-days", "4"],
     "retrain": [sys.executable, "scripts/run_backtest.py", "--fit-only"],
     "report":  [sys.executable, "-m", "src.backtest.report"],
+    "ticks":   [sys.executable, "-m", "src.data.underdog_ticks"],
 }
 
 LOGS_DIR = "logs"
@@ -201,7 +210,7 @@ def _subprocess_runner(argv: list[str]):
 
 def main():
     if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
-        print("Usage: python scripts/run_cadence.py {refresh|settle|retrain|report}")
+        print("Usage: python scripts/run_cadence.py {refresh|settle|retrain|report|ticks}")
         sys.exit(0)
 
     name = sys.argv[1]

@@ -1,4 +1,4 @@
-# install_cadences.ps1 — Register (or delete) the four OddsOptimizer cadences
+# install_cadences.ps1 — Register (or delete) the five OddsOptimizer cadences
 # in Windows Task Scheduler.
 #
 # Design: docs/design/specs/2026-06-29-cadence-automation-design.md
@@ -29,6 +29,14 @@
 #   B must fire AFTER overnight Statcast finalizes (~11:00 ET). 12:00 ET target.
 #   C (weekly) fires before the 7-day staleness warning trips. Monday 08:00 ET.
 #   D (weekly) fires after B on the same day. Monday 12:30 ET.
+#   E (daily, repeating -- 2026-08 CLV feature) is NOT a "fire once" cadence
+#     like A-D: it polls Underdog's live feed every 20 minutes from 09:00 ET
+#     through end of day (24:00 ET), the window covering every first pitch on
+#     the slate (first-pitch times spread up to ~5-6 hours across one day) so
+#     the tick log can capture each game's actual closing line, not just an
+#     early-morning snapshot. It has no ordering dependency on A/B/C/D and
+#     touches nothing they read or write (see src/data/underdog_ticks.py) --
+#     it is purely additive and safe to add without touching A-D at all.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION — edit these before running
@@ -46,20 +54,37 @@ $START_TIME_A = "10:00"   # daily   — cadence A: morning refresh
 $START_TIME_B = "12:00"   # daily   — cadence B: settle --window-days 4
 $START_TIME_C = "08:00"   # weekly  — cadence C: retrain (--fit-only)
 $START_TIME_D = "12:30"   # weekly  — cadence D: live report
+$START_TIME_E = "09:00"   # daily, repeating — cadence E: tick poller (see -RepeatInterval below)
 
 # Day of week for the weekly tasks (C and D).
 $WEEKLY_DAY = "MON"
 
+# Cadence E repeats through the day rather than firing once. 20-minute
+# interval for 15 hours starting at $START_TIME_E covers 09:00-24:00 local —
+# every first pitch on a normal MLB slate.
+$TICKS_REPEAT_INTERVAL_MIN = 20
+$TICKS_REPEAT_DURATION     = "0015:00"   # HHHH:MM — 15 hours, 0 minutes
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: build the schtasks /Create argument string
 # ─────────────────────────────────────────────────────────────────────────────
+# -RepeatInterval / -Duration (2026-08, cadence E): schtasks' documented
+# contract for a repeating trigger is /RI <minutes> together with /DU
+# <HHHH:MM> (or /ET <end-time> — this script always uses /DU). /RI without
+# /DU or /ET defaults to a 1-hour repeat window, which is NOT what cadence E
+# wants, so /DU is required whenever /RI is passed. VERIFY this against
+# `schtasks /Create /?` on your own machine before relying on it — Windows
+# version/locale differences are exactly the kind of thing worth a 10-second
+# spot check before you trust an unattended scheduled task with it.
 function Register-Cadence {
     param(
         [string]$TaskName,
         [string]$Cadence,
-        [string]$ScheduleType,   # "DAILY" or "WEEKLY"
+        [string]$ScheduleType,     # "DAILY" or "WEEKLY"
         [string]$StartTime,
-        [string]$Day = ""        # used only for WEEKLY
+        [string]$Day = "",         # used only for WEEKLY
+        [int]$RepeatInterval = 0,  # minutes; 0 = no repetition (cadences A-D)
+        [string]$Duration = ""     # HHHH:MM; required when RepeatInterval > 0
     )
 
     $cmd = "`"$PYTHON`" `"$REPO_ROOT\scripts\run_cadence.py`" $Cadence"
@@ -76,6 +101,13 @@ function Register-Cadence {
     if ($ScheduleType -eq "WEEKLY" -and $Day) {
         $schtasksArgs += "/D", $Day
     }
+    if ($RepeatInterval -gt 0) {
+        if (-not $Duration) {
+            Write-Error "Register-Cadence: -RepeatInterval given without -Duration for $TaskName -- aborting registration to avoid the 1-hour schtasks default."
+            return
+        }
+        $schtasksArgs += "/RI", $RepeatInterval, "/DU", $Duration
+    }
 
     Write-Host "Registering: OddsOptimizer\$TaskName ..."
     & schtasks @schtasksArgs
@@ -87,7 +119,7 @@ function Register-Cadence {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGISTER — run this block to install all four tasks
+# REGISTER — run this block to install all five tasks
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=== Installing OddsOptimizer cadence tasks ==="
@@ -106,6 +138,10 @@ Register-Cadence -TaskName "C-retrain" -Cadence "retrain" `
 
 Register-Cadence -TaskName "D-report"  -Cadence "report"  `
     -ScheduleType "WEEKLY" -StartTime $START_TIME_D -Day $WEEKLY_DAY
+
+Register-Cadence -TaskName "E-ticks"   -Cadence "ticks"   `
+    -ScheduleType "DAILY" -StartTime $START_TIME_E `
+    -RepeatInterval $TICKS_REPEAT_INTERVAL_MIN -Duration $TICKS_REPEAT_DURATION
 
 Write-Host ""
 Write-Host "Done. Confirm in Task Scheduler: taskschd.msc -> Task Scheduler Library -> OddsOptimizer"
@@ -129,20 +165,26 @@ Write-Host ""
 # D — weekly live report (Monday ~12:30 local, ET-anchored):
 #   schtasks /Create /F /TN "OddsOptimizer\D-report"  /TR "\"<PYTHON>\" \"<REPO_ROOT>\scripts\run_cadence.py\" report"  /SC WEEKLY /D MON /ST 12:30 /RL HIGHEST
 #
+# E — daily, repeating tick poller (09:00-24:00 local, every 20 min, ET-anchored;
+#     2026-08 CLV feature -- see src/data/underdog_ticks.py):
+#   schtasks /Create /F /TN "OddsOptimizer\E-ticks" /TR "\"<PYTHON>\" \"<REPO_ROOT>\scripts\run_cadence.py\" ticks" /SC DAILY /ST 09:00 /RI 20 /DU 0015:00 /RL HIGHEST
+#
 # ─────────────────────────────────────────────────────────────────────────────
 # DELETE / UNREGISTER (reversible)
 # ─────────────────────────────────────────────────────────────────────────────
-# To remove all four tasks:
+# To remove all five tasks:
 #   schtasks /Delete /TN "OddsOptimizer\A-refresh" /F
 #   schtasks /Delete /TN "OddsOptimizer\B-settle"  /F
 #   schtasks /Delete /TN "OddsOptimizer\C-retrain" /F
 #   schtasks /Delete /TN "OddsOptimizer\D-report"  /F
+#   schtasks /Delete /TN "OddsOptimizer\E-ticks"   /F
 #
 # Or from PowerShell (requires admin):
 #   Unregister-ScheduledTask -TaskName "A-refresh" -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "B-settle"  -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "C-retrain" -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "D-report"  -TaskPath "\OddsOptimizer\" -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "E-ticks"   -TaskPath "\OddsOptimizer\" -Confirm:$false
 
 # =============================================================================
 # APPENDIX A — cron (macOS / Linux)
@@ -164,6 +206,9 @@ Write-Host ""
 #
 #   # D — weekly report Monday ~12:30 local
 #   30 12 * * 1  cd $REPO && $PYTHON scripts/run_cadence.py report  >> /tmp/cadence_report.log  2>&1
+#
+#   # E — tick poller: every 20 min, 09:00-23:59 local (2026-08 CLV feature)
+#   */20 9-23 * * *  cd $REPO && $PYTHON scripts/run_cadence.py ticks >> /tmp/cadence_ticks.log 2>&1
 #
 # (run_cadence.py still writes logs/cadence_*.log regardless of the cron
 # redirect above — the redirect is just a belt-and-suspenders fallback.)

@@ -99,10 +99,12 @@ def _sample_payload():
                 "options": [
                     {"choice": "higher", "american_price": "-148", "decimal_price": 1.68,
                      "payout_multiplier": "0.68", "status": "active",
-                     "selection_header": "Gerrit Cole", "selection_subheader": "Higher"},
+                     "selection_header": "Gerrit Cole", "selection_subheader": "Higher",
+                     "updated_at": "2026-08-23T14:02:11Z"},
                     {"choice": "lower", "american_price": "+124", "decimal_price": 2.24,
                      "payout_multiplier": "1.24", "status": "active",
-                     "selection_header": "Gerrit Cole", "selection_subheader": "Lower"},
+                     "selection_header": "Gerrit Cole", "selection_subheader": "Lower",
+                     "updated_at": "2026-08-23T14:02:11Z"},
                 ],
             },
             {
@@ -169,6 +171,8 @@ def test_flatten_lines_joins_and_parses_both_options():
     assert row["under_payout_multiplier"] == pytest.approx(1.24)
     assert row["over_status"] == "active"
     assert row["under_status"] == "active"
+    assert row["over_updated_at"] == "2026-08-23T14:02:11Z"
+    assert row["under_updated_at"] == "2026-08-23T14:02:11Z"
 
 
 def test_flatten_lines_game_title_splitting():
