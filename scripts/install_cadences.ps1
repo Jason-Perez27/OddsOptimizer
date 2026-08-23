@@ -1,5 +1,12 @@
-# install_cadences.ps1 — Register (or delete) the five OddsOptimizer cadences
-# in Windows Task Scheduler.
+# install_cadences.ps1 — Register (or delete) the FOUR locally-scheduled
+# OddsOptimizer cadences (A-D) in Windows Task Scheduler.
+#
+# Cadence E (the Underdog tick poller) is NOT registered here as of 2026-08:
+# it moved to GitHub Actions (.github/workflows/tick-poller.yml) so line
+# collection continues even when this machine is off. See "Why only cadence
+# E is cloud-hosted" in docs/runbook_go_live.md. `run_cadence.py ticks`
+# still works for manual/local runs and testing -- it's just no longer
+# registered as a scheduled task by this script.
 #
 # Design: docs/design/specs/2026-06-29-cadence-automation-design.md
 # ("Scheduling on the user's machine (Windows — primary)").
@@ -29,14 +36,12 @@
 #   B must fire AFTER overnight Statcast finalizes (~11:00 ET). 12:00 ET target.
 #   C (weekly) fires before the 7-day staleness warning trips. Monday 08:00 ET.
 #   D (weekly) fires after B on the same day. Monday 12:30 ET.
-#   E (daily, repeating -- 2026-08 CLV feature) is NOT a "fire once" cadence
-#     like A-D: it polls Underdog's live feed every 20 minutes from 09:00 ET
-#     through end of day (24:00 ET), the window covering every first pitch on
-#     the slate (first-pitch times spread up to ~5-6 hours across one day) so
-#     the tick log can capture each game's actual closing line, not just an
-#     early-morning snapshot. It has no ordering dependency on A/B/C/D and
-#     touches nothing they read or write (see src/data/underdog_ticks.py) --
-#     it is purely additive and safe to add without touching A-D at all.
+#   E (the tick poller, 2026-08 CLV feature) is NOT scheduled by this script
+#     at all -- it runs on GitHub Actions instead (every 15 min, continuous,
+#     see .github/workflows/tick-poller.yml), specifically so it keeps
+#     running when this machine is off. It has no ordering dependency on
+#     A/B/C/D and touches nothing they read or write (see
+#     src/data/underdog_ticks.py) -- purely additive either way.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION — edit these before running
@@ -54,28 +59,28 @@ $START_TIME_A = "10:00"   # daily   — cadence A: morning refresh
 $START_TIME_B = "12:00"   # daily   — cadence B: settle --window-days 4
 $START_TIME_C = "08:00"   # weekly  — cadence C: retrain (--fit-only)
 $START_TIME_D = "12:30"   # weekly  — cadence D: live report
-$START_TIME_E = "09:00"   # daily, repeating — cadence E: tick poller (see -RepeatInterval below)
 
 # Day of week for the weekly tasks (C and D).
 $WEEKLY_DAY = "MON"
 
-# Cadence E repeats through the day rather than firing once. 20-minute
-# interval for 15 hours starting at $START_TIME_E covers 09:00-24:00 local —
-# every first pitch on a normal MLB slate.
-$TICKS_REPEAT_INTERVAL_MIN = 20
-$TICKS_REPEAT_DURATION     = "0015:00"   # HHHH:MM — 15 hours, 0 minutes
+# (No $START_TIME_E / repeat-interval config here -- cadence E runs on
+# GitHub Actions now, not Windows Task Scheduler. See
+# .github/workflows/tick-poller.yml.)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: build the schtasks /Create argument string
 # ─────────────────────────────────────────────────────────────────────────────
-# -RepeatInterval / -Duration (2026-08, cadence E): schtasks' documented
-# contract for a repeating trigger is /RI <minutes> together with /DU
-# <HHHH:MM> (or /ET <end-time> — this script always uses /DU). /RI without
-# /DU or /ET defaults to a 1-hour repeat window, which is NOT what cadence E
-# wants, so /DU is required whenever /RI is passed. VERIFY this against
-# `schtasks /Create /?` on your own machine before relying on it — Windows
-# version/locale differences are exactly the kind of thing worth a 10-second
-# spot check before you trust an unattended scheduled task with it.
+# -RepeatInterval / -Duration: general support for a repeating trigger,
+# originally added (2026-08) for cadence E's tick poller. Cadence E no
+# longer runs locally (moved to GitHub Actions -- see above), so nothing
+# below currently passes these, but the capability is kept in case a future
+# local repeating cadence needs it. schtasks' documented contract for a
+# repeating trigger is /RI <minutes> together with /DU <HHHH:MM> (or /ET
+# <end-time> — this script always uses /DU); /RI without /DU or /ET
+# defaults to a 1-hour repeat window. VERIFY this against `schtasks /Create
+# /?` on your own machine before relying on it — Windows version/locale
+# differences are exactly the kind of thing worth a 10-second spot check
+# before you trust an unattended scheduled task with it.
 function Register-Cadence {
     param(
         [string]$TaskName,
@@ -119,7 +124,7 @@ function Register-Cadence {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGISTER — run this block to install all five tasks
+# REGISTER — run this block to install all four local tasks
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=== Installing OddsOptimizer cadence tasks ==="
@@ -139,12 +144,10 @@ Register-Cadence -TaskName "C-retrain" -Cadence "retrain" `
 Register-Cadence -TaskName "D-report"  -Cadence "report"  `
     -ScheduleType "WEEKLY" -StartTime $START_TIME_D -Day $WEEKLY_DAY
 
-Register-Cadence -TaskName "E-ticks"   -Cadence "ticks"   `
-    -ScheduleType "DAILY" -StartTime $START_TIME_E `
-    -RepeatInterval $TICKS_REPEAT_INTERVAL_MIN -Duration $TICKS_REPEAT_DURATION
-
 Write-Host ""
 Write-Host "Done. Confirm in Task Scheduler: taskschd.msc -> Task Scheduler Library -> OddsOptimizer"
+Write-Host "(Cadence E -- the tick poller -- is not installed by this script; it runs on"
+Write-Host " GitHub Actions. See .github/workflows/tick-poller.yml and the runbook.)"
 Write-Host ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,26 +168,27 @@ Write-Host ""
 # D — weekly live report (Monday ~12:30 local, ET-anchored):
 #   schtasks /Create /F /TN "OddsOptimizer\D-report"  /TR "\"<PYTHON>\" \"<REPO_ROOT>\scripts\run_cadence.py\" report"  /SC WEEKLY /D MON /ST 12:30 /RL HIGHEST
 #
-# E — daily, repeating tick poller (09:00-24:00 local, every 20 min, ET-anchored;
-#     2026-08 CLV feature -- see src/data/underdog_ticks.py):
-#   schtasks /Create /F /TN "OddsOptimizer\E-ticks" /TR "\"<PYTHON>\" \"<REPO_ROOT>\scripts\run_cadence.py\" ticks" /SC DAILY /ST 09:00 /RI 20 /DU 0015:00 /RL HIGHEST
+# (Cadence E, the tick poller, is intentionally absent here -- it runs on
+# GitHub Actions, not schtasks. See .github/workflows/tick-poller.yml.)
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # DELETE / UNREGISTER (reversible)
 # ─────────────────────────────────────────────────────────────────────────────
-# To remove all five tasks:
+# To remove all four local tasks:
 #   schtasks /Delete /TN "OddsOptimizer\A-refresh" /F
 #   schtasks /Delete /TN "OddsOptimizer\B-settle"  /F
 #   schtasks /Delete /TN "OddsOptimizer\C-retrain" /F
 #   schtasks /Delete /TN "OddsOptimizer\D-report"  /F
-#   schtasks /Delete /TN "OddsOptimizer\E-ticks"   /F
 #
 # Or from PowerShell (requires admin):
 #   Unregister-ScheduledTask -TaskName "A-refresh" -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "B-settle"  -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "C-retrain" -TaskPath "\OddsOptimizer\" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "D-report"  -TaskPath "\OddsOptimizer\" -Confirm:$false
-#   Unregister-ScheduledTask -TaskName "E-ticks"   -TaskPath "\OddsOptimizer\" -Confirm:$false
+#
+# To stop the cloud poller (cadence E), disable or delete
+# .github/workflows/tick-poller.yml on `main` -- there is nothing to
+# unregister locally.
 
 # =============================================================================
 # APPENDIX A — cron (macOS / Linux)
@@ -207,32 +211,26 @@ Write-Host ""
 #   # D — weekly report Monday ~12:30 local
 #   30 12 * * 1  cd $REPO && $PYTHON scripts/run_cadence.py report  >> /tmp/cadence_report.log  2>&1
 #
-#   # E — tick poller: every 20 min, 09:00-23:59 local (2026-08 CLV feature)
-#   */20 9-23 * * *  cd $REPO && $PYTHON scripts/run_cadence.py ticks >> /tmp/cadence_ticks.log 2>&1
-#
-# (run_cadence.py still writes logs/cadence_*.log regardless of the cron
-# redirect above — the redirect is just a belt-and-suspenders fallback.)
+# (Cadence E, the tick poller, is intentionally absent here too -- see
+# Appendix B. run_cadence.py still writes logs/cadence_*.log regardless of
+# the cron redirect above — the redirect is just a belt-and-suspenders
+# fallback.)
 
 # =============================================================================
-# APPENDIX B — GitHub Actions (future infra, not the default)
+# APPENDIX B — GitHub Actions (cadence E, tick poller — BUILT, 2026-08)
 # =============================================================================
-# A schedule: workflow COULD trigger these cadences, but only if the data
-# directory (data/) is accessible to the runner — it is gitignored and lives
-# only on the local machine. Options to make it viable:
-#   - Mount data/ from a cloud storage bucket (S3, GCS) the runner can read/write.
-#   - Run a self-hosted GitHub Actions runner on the same machine (then it is
-#     effectively the same as Task Scheduler, with more ceremony).
-# Until data/ is hosted somewhere the runner can reach, GitHub Actions is not
-# a substitute for the local scheduler. Deferred to future infra.
+# Cadence E (the Underdog tick poller) runs on GitHub Actions, not on this
+# machine at all: .github/workflows/tick-poller.yml, polling every 15
+# minutes and committing new ticks to the orphan `data-ticks` branch. This
+# was the one cadence worth moving off Task Scheduler, because it is the
+# only cadence that captures unbackfillable data -- see "Why only cadence E
+# is cloud-hosted" in docs/runbook_go_live.md. A-D stayed local; they don't
+# need cloud hosting (see that section for the reasoning) and their data/
+# directory is gitignored and local-only, which is exactly the constraint
+# that ruled out moving A-D themselves: they read/write the predictions
+# partition and model artifacts, which are not (and should not become)
+# accessible to a GitHub-hosted runner.
 #
-# Skeleton for reference (assumes a self-hosted runner or cloud-mounted data/):
-#
-#   on:
-#     schedule:
-#       - cron: "0 15 * * *"    # 15:00 UTC = 10:00 ET (standard) / 11:00 EDT
-#   jobs:
-#     refresh:
-#       runs-on: self-hosted
-#       steps:
-#         - uses: actions/checkout@v4
-#         - run: python scripts/run_cadence.py refresh
+# One-time setup and verification: docs/runbook_go_live.md, Step 3a/3b.
+# Pull cloud ticks down for local analysis:
+#   git fetch origin data-ticks && git checkout data-ticks -- data/raw/underdog_ticks

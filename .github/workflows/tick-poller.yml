@@ -1,0 +1,127 @@
+# Cloud-hosted cadence E: polls Underdog's over/under lines feed and commits
+# any genuinely new ticks to the orphan `data-ticks` branch. Runs entirely
+# independent of the local A-D cadences (see docs/runbook_go_live.md,
+# "Why only cadence E is cloud-hosted") -- it never touches `main`, never
+# runs the model, never retrains, and never touches the predictions
+# partition. Purely additive line-movement capture, nothing else.
+#
+# One-time setup required before this workflow can run at all: bootstrap
+# the `data-ticks` branch (docs/runbook_go_live.md, Step 3a) and merge this
+# file to `main` (scheduled workflows only fire from the default branch).
+# After merging, verify per Step 3b: trigger manually via workflow_dispatch
+# first, THEN confirm a real scheduled run fires before relying on it.
+name: tick-poller
+
+on:
+  schedule:
+    # Every 15 minutes, 12:00-06:00 UTC wrapped -- i.e. 12-23 and 0-6 UTC,
+    # which covers roughly 08:00 ET through 02:00 ET (EDT/EST both), spanning
+    # every MLB first pitch on a slate. 15 minutes (not 20) deliberately
+    # buys margin against GitHub's documented 15-60 minute scheduling delay
+    # and occasional dropped runs under load -- see the runbook's
+    # "Actions cron is best-effort" note. Do not assume every tick fires.
+    - cron: '*/15 12-23,0-6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tick-poller
+  # Never cancel an in-flight run for a delayed one -- a delayed run
+  # overlapping and racing an in-progress push is exactly what this avoids.
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (code)
+        uses: actions/checkout@v4
+
+      - name: Checkout data-ticks (existing tick data, for dedupe)
+        uses: actions/checkout@v4
+        with:
+          ref: data-ticks
+          path: .ticks
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install poller dependencies only
+        # Deliberately NOT `pip install -r requirements.txt` -- pybaseball,
+        # scipy, and the rest of the model stack are irrelevant to this job
+        # and would add minutes to every 15-minute run for no benefit.
+        run: pip install requests pandas
+
+      - name: Poll Underdog and append new ticks
+        id: poll
+        run: |
+          python -m src.data.underdog_ticks --output-dir .ticks/data/raw/underdog_ticks | tee poll_output.txt
+          # Pull the machine-readable summary line out for later steps.
+          grep '^SUMMARY_JSON:' poll_output.txt | sed 's/^SUMMARY_JSON://' > summary.json
+          cat summary.json
+
+      - name: Commit and push new ticks
+        id: commit
+        working-directory: .ticks
+        run: |
+          set -euo pipefail
+          git config user.name "tick-poller-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes -- off-day or no line movement since the last poll. Skipping commit."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          n_rows=$(python -c "import json; print(json.load(open('../summary.json'))['n_rows_written'])")
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          git add -A
+          git commit -m "ticks: ${ts} (${n_rows} rows)"
+
+          attempt=1
+          max_attempts=3
+          until git push origin data-ticks; do
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Push failed after ${max_attempts} attempts." >&2
+              exit 1
+            fi
+            echo "Push failed (attempt ${attempt}/${max_attempts}) -- pulling --rebase and retrying."
+            git pull --rebase origin data-ticks
+            attempt=$((attempt + 1))
+          done
+
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          python - <<'PYEOF'
+          import json
+          import os
+
+          try:
+              with open("summary.json") as f:
+                  summary = json.load(f)
+          except Exception as exc:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+                  out.write("## tick-poller run\n\n")
+                  out.write(f"Could not read poll summary: {exc}\n")
+              raise SystemExit(0)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("## tick-poller run\n\n")
+              out.write(f"- Polled at: `{summary.get('polled_at')}`\n")
+              out.write(f"- Lines seen: {summary.get('n_lines_seen')}\n")
+              out.write(f"- Games seen: {summary.get('n_games')}\n")
+              out.write(
+                  f"- New tick rows written (lines whose updated_at changed "
+                  f"since the previous poll): {summary.get('n_rows_written')}\n"
+              )
+          PYEOF

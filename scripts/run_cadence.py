@@ -27,9 +27,17 @@ exactly the one named action. The five cadences are:
 Cadence E (2026-08, CLV feature) is purely additive: it appends genuinely new
 Underdog price ticks to data/raw/underdog_ticks/ and never touches
 line_picks.csv, the predictions partition, or the frozen morning snapshot.
-Unlike A-D it repeats through the day (see scripts/install_cadences.ps1's
--RepeatInterval) rather than firing once — a single tick log needs many polls
-across an evening/day to actually capture line movement.
+
+**Cadence E's SCHEDULED execution moved off this local wrapper (2026-08) and
+onto GitHub Actions** — see .github/workflows/tick-poller.yml and the
+"Why only cadence E is cloud-hosted" section of docs/runbook_go_live.md. It
+is the one cadence that captures unbackfillable data (a line movement not
+observed is gone forever), so it needed to keep running even when this
+machine/laptop is off; A-D are all backfillable or weekly and tolerate a
+closed laptop, so they stayed local. The "ticks" entry below is kept in
+_CADENCE_ARGV for manual local runs and testing (`python scripts/run_cadence.py
+ticks`) — it is simply no longer registered as a local scheduled task (see
+scripts/install_cadences.ps1, which no longer registers an E-ticks task).
 
 Design: dependency-injected `runner` so tests call dispatch() with a fake
 runner and never invoke a real CLI or touch the network. The CLI path at the
@@ -53,6 +61,9 @@ _CADENCE_ARGV: dict[str, list[str]] = {
     "settle":  [sys.executable, "-m", "src.pipeline.settle", "--window-days", "4"],
     "retrain": [sys.executable, "scripts/run_backtest.py", "--fit-only"],
     "report":  [sys.executable, "-m", "src.backtest.report"],
+    # Scheduled execution now lives in .github/workflows/tick-poller.yml
+    # (GitHub Actions) -- this entry is kept for manual local runs/testing
+    # only; it is not registered as a local scheduled task.
     "ticks":   [sys.executable, "-m", "src.data.underdog_ticks"],
 }
 
