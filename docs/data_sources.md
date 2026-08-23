@@ -18,20 +18,23 @@ All sources below are free for this project's scale. None require payment. Anyth
 - **Use in this project:** Pre-game pipeline — confirming today's probable pitcher and opposing lineup.
 - **Link:** https://github.com/toddrob99/MLB-StatsAPI
 
-## Odds data
+## Prop lines
 
-### The Odds API
-- **What:** Aggregates sportsbook odds across multiple bookmakers.
-- **Cost:** Free tier = 500 credits/month. The `pitcher_strikeouts` market is available on the free tier for **current** odds only.
-- **Important limit:** Historical odds (for backtesting past seasons) require a paid plan. This project avoids that dependency by only pulling current lines, day-of, for live comparison against model predictions — not bulk historical backfill.
-- **Credit cost:** usage = (number of markets) × (number of regions) per call. Querying `pitcher_strikeouts` for one region costs 1 credit per call.
-- **Link:** https://the-odds-api.com/
+### Underdog Fantasy (primary, as of 2026-08)
+- **What:** Pick'em-style DFS app. Posts a genuine two-sided over/under line per prop (e.g. "Pitcher Strikeouts: 6.5, over −140 / under +118"), unlike PrizePicks' old single flat line — the two-sided price is what lets this project compute a real no-vig market probability instead of just comparing against a bare number.
+- **Cost:** Free. Pulled via Underdog's public pick'em feed (`api.underdogfantasy.com/beta/v6/over_under_lines`), which is **unofficial** — undocumented, not a published developer API, subject to their Terms of Service, and may change shape without notice.
+- **Coverage:** Current/upcoming lines only, posted progressively through the morning as the slate firms up (a partial slate early in the day is normal, not a bug) — no historical backfill available this way.
+- **Use in this project:** Primary (and only) line source for all pitcher props (strikeouts first, then pitching outs / earned runs allowed / walks allowed). `src/data/underdog_lines.py` converts each side's American odds to implied probability and no-vig-normalizes the pair to get `p_market`, which the model's own probability is compared against to compute edge.
+- **Use responsibly:** personal/research use only, consistent with this repo's disclaimer — not a commercial scraping operation.
+
+### PrizePicks (decommissioned, 2026-06-27 – 2026-08)
+PrizePicks was the original line source. It was replaced after its public projections endpoint began permanently returning HTTP 403 (DataDome bot protection), and — separately — after it replaced its standard/goblin/demon ladder with unpublished-payout two-sided alternates that no longer fit this project's fixed-payout edge calculation. See `docs/decision_log.md` for the full history; `src/data/prizepicks_lines.py` is kept, unmodified, purely as a historical record and is no longer imported anywhere in the pipeline.
 
 ## What is explicitly out of scope for now
 
-- **Historical odds backfill** — paid tier only; not needed for the current MVP since we're comparing live predictions to live lines, not re-deriving CLV from history.
-- **Any paid data provider** (SportsDataIO, OpticOdds, Sportradar, etc.) — would only be considered later if the project needs deeper historical odds coverage, and would always be labeled as optional/paid before use.
+- **Historical odds backfill** — not needed for the current MVP since we're comparing live predictions to live lines, not re-deriving CLV from history.
+- **Any paid data provider** (SportsDataIO, OpticOdds, Sportradar, The Odds API, etc.) — would only be considered later if the project needs deeper historical odds coverage, and would always be labeled as optional/paid before use.
 
 ## Storage policy
 
-Raw and processed data files are never committed to GitHub (`data/` is gitignored). API keys (e.g., for The Odds API) are never committed — they belong in a local `.env` file that is also gitignored.
+Raw and processed data files are never committed to GitHub (`data/` is gitignored). No API keys or credentials are stored in this repo.

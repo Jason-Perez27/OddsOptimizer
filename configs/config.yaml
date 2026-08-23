@@ -1,22 +1,50 @@
 # Placeholder project config. No secrets or API keys belong in this file.
-# Actual keys (e.g. ODDS_API_KEY) go in a local .env file, which is gitignored.
 
 project:
   name: OddsOptimizer
   sport: mlb
-  market: pitcher_strikeouts
+  # Build/validate strikeouts first, then generalize to the rest.
+  props:
+    - stat_type: Strikeouts
+      thresholds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    - stat_type: Pitching Outs
+      thresholds: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    - stat_type: Earned Runs Allowed
+      thresholds: [1, 2, 3, 4, 5]
+    - stat_type: Walks Allowed
+      thresholds: [1, 2, 3, 4, 5]
+  active_prop: Strikeouts
 
 data:
   raw_dir: data/raw
   processed_dir: data/processed
 
-odds_api:
-  base_url: https://api.the-odds-api.com/v4
-  sport_key: baseball_mlb
-  market_key: pitcher_strikeouts
-  regions: us
-  # api_key: set via environment variable ODDS_API_KEY, not here
+underdog:
+  base_url: https://api.underdogfantasy.com
+  feed_path: /beta/v6/over_under_lines
+  sport_id: MLB
+  # No API key required; public endpoint. Replaces the PrizePicks source
+  # (2026-08 migration -- PrizePicks' public endpoint now permanently 403s
+  # and had already dropped its published payout structure; see
+  # docs/data_sources.md and docs/decision_log.md).
 
 model:
   type: poisson_regression
-  target: predicted_strikeouts
+  target: predicted_count_distribution  # per-threshold P(over), not a single mean
+
+confidence_tiers:
+  # Pure model-probability cutoffs -- no dependency on the posted line.
+  high: { min_prob: 0.70, max_prob: 0.30 }   # P>=0.70 or P<=0.30
+  medium: { min_prob: 0.60, max_prob: 0.40 } # P in [0.60,0.70) or (0.30,0.40]
+  low: default
+
+evaluation:
+  # task #10 (outcome tracking & backtest, docs/design/specs/
+  # 2026-06-27-outcome-tracking-design.md). Read only by src/pipeline/
+  # settle.py's CLI (main()) -- run_settlement() itself takes these as
+  # explicit keyword args so it stays pure/testable with no config-file
+  # dependency, matching src/pipeline/refresh.py's convention.
+  settlement_lag_hours: 4       # don't even attempt a date whose games may not be final yet
+  scratch_void_max_wait_days: 3 # no Statcast row past this many days -> void_scratched, not pending
+  reliability_n_buckets: 10     # calibration/reliability-table bucket count
+  rolling_window: 50            # rolling hit-rate/ROI window size (picks)

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pitcher projections — OddsOptimizer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="title-row">
+    <h1 id="page-title">Pitcher projections</h1>
+    <span class="pill" id="date-pill">—</span>
+    <span class="live"><span class="dot"></span> auto-refresh <span id="refresh-mins">5m</span></span>
+  </div>
+  <div class="controls">
+    <label for="prop-select">Prop</label>
+    <select id="prop-select">
+      <option value="strikeouts">Strikeouts</option>
+      <option value="walks">Walks</option>
+      <option value="earned_runs">Earned Runs</option>
+    </select>
+    <label for="date-select">Slate</label>
+    <select id="date-select"></select>
+    <label for="sort-select">Sort by</label>
+    <select id="sort-select">
+      <option value="mu">Projected K</option>
+      <option value="conviction">Conviction</option>
+      <option value="edge">Edge</option>
+      <option value="p_over_line">P(over line)</option>
+      <option value="tier">Tier</option>
+    </select>
+    <label style="white-space:nowrap"><input type="checkbox" id="actionable-filter"> Actionable only</label>
+    <button id="refresh-btn" type="button">Reload</button>
+  </div>
+  <p class="disclaimer">Research / analytics only — not betting advice. Edge is the model's P(over) vs the line's own no-vig market probability; it is a model-vs-market comparison, not a validated betting signal.</p>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<section class="kpis" id="kpis"></section>
+
+<main class="layout">
+  <section class="slate-wrap">
+    <div class="section-label">Slate <span class="muted" id="slate-sub"></span></div>
+    <div id="slate" class="slate"></div>
+  </section>
+  <section class="detail-wrap">
+    <div id="detail" class="detail muted">Select a pitcher to see the probability ladder and decision stats.</div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span id="model-line"></span>
+  <span class="legend">
+    Two-sided Underdog Fantasy lines. "edge vs market" compares the model's P(over) to the line's own no-vig market probability, not a fixed 50%.
+  </span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
