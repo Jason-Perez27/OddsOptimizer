@@ -53,11 +53,32 @@ Design:
   PyPI package just to look up one long-stable, well-documented US civil
   rule (2nd Sunday of March 02:00 local -> 1st Sunday of November 02:00
   local, in effect since 2007) would be a new dependency for no real benefit.
+
+Hardening for the GitHub Actions poller (2026-08, cloud-hosted cadence E --
+see .github/workflows/tick-poller.yml and docs/runbook_go_live.md):
+- `poll_at` is the actual wall-clock time the fetch SUCCEEDED, captured
+  AFTER `fetch_over_under_lines` returns, never before it and never derived
+  from a cron schedule time. Actions cron fires 15-60 minutes late under
+  load (documented GitHub behavior) -- recording an assumed/scheduled time
+  instead of the real one would silently corrupt every downstream
+  `minutes_before_first_pitch` / `close_quality` computation in
+  src/evaluation/clv.py.
+- The fetch is wrapped in a bounded retry (`_fetch_with_retry`): up to 3
+  retries beyond the first attempt (4 attempts total), exponential backoff
+  2s/4s/8s between them. A dropped poll is unrecoverable -- unlike
+  Statcast/boxscores/probables/Vegas odds, a line movement not observed is
+  gone forever, so it's worth spending a few seconds retrying a transient
+  network blip. A 403, however, means Underdog's endpoint shape or bot
+  protection changed (the same permanent failure `fetch_over_under_lines`
+  already raises a clear RuntimeError for) -- that is NOT retried; it needs
+  a human, and retrying it would just burn Actions minutes for nothing.
 """
 
 import argparse
 import csv
+import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -74,12 +95,10 @@ from src.data.underdog_lines import (
 # Paths / schema
 # ---------------------------------------------------------------------------
 
-# Named `processed_dir` to match this repo's other pipeline entry points'
-# first positional/keyword argument (e.g. refresh.run_refresh's
-# processed_dir / model_path convention) -- despite the name, this points at
-# data/raw/underdog_ticks/, never data/processed/. Ticks are raw capture
-# data: gitignored exactly like every other data/ file, and independent of
-# the predictions partition this parameter name echoes.
+# Default output root. Overridable via poll_once(output_dir=...) / the CLI's
+# --output-dir flag -- the GitHub Actions poller (see .github/workflows/
+# tick-poller.yml) points this at a checked-out `data-ticks` branch instead
+# of the local data/raw/ tree. Local runs never need to pass it.
 DEFAULT_TICKS_ROOT = os.path.join("data", "raw", "underdog_ticks")
 
 TICK_COLUMNS = [
@@ -204,6 +223,62 @@ def _append_new_ticks(ticks_root: str, game_date: str, ticks: list) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Bounded retry (GitHub Actions hardening -- see module docstring)
+# ---------------------------------------------------------------------------
+
+# Delays (seconds) before retry attempts 1, 2, 3 -- i.e. up to 3 retries
+# beyond the first attempt, 4 attempts total. Three delay values is a
+# deliberate signal of "3 retries", not "3 attempts" (which would only need
+# two gaps) -- every stated delay is actually used.
+_RETRY_DELAYS = (2, 4, 8)
+
+
+def _is_permanent_403(exc: Exception) -> bool:
+    """
+    True if `exc` represents a 403 -- Underdog's endpoint shape or bot
+    protection changed, which needs a human, not a retry.
+
+    Covers both cases seen in this codebase:
+    - fetch_over_under_lines raises a plain RuntimeError whose message
+      contains "403" (its own permanent-failure convention).
+    - A defensive fallback for a `requests`-style exception carrying a
+      `.response.status_code == 403` (in case a future `fetcher=` override
+      raises requests.HTTPError directly instead).
+    """
+    if isinstance(exc, RuntimeError) and "403" in str(exc):
+        return True
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None) == 403:
+        return True
+    return False
+
+
+def _fetch_with_retry(fetch, *, retry_delays=_RETRY_DELAYS, sleep_fn=None):
+    """
+    Call `fetch()` (zero-arg callable) and return its result, retrying
+    transient failures up to len(retry_delays) times with the given
+    backoff. A 403 (`_is_permanent_403`) is never retried -- it's re-raised
+    immediately, since it means the endpoint needs a human look, not
+    another attempt.
+
+    `sleep_fn`: injectable sleep (defaults to time.sleep) so tests never
+    actually wait out the backoff.
+    """
+    _sleep = sleep_fn or time.sleep
+    last_exc = None
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            return fetch()
+        except Exception as exc:
+            if _is_permanent_403(exc):
+                raise
+            last_exc = exc
+            if attempt < len(retry_delays):
+                _sleep(retry_delays[attempt])
+    raise last_exc
+
+
+# ---------------------------------------------------------------------------
 # The poller
 # ---------------------------------------------------------------------------
 
@@ -242,37 +317,51 @@ def _build_tick(row: "pd.Series", poll_at: str) -> dict:
     }
 
 
-def poll_once(processed_dir: str = DEFAULT_TICKS_ROOT, stats=None, now=None, *, fetcher=None) -> dict:
+def poll_once(output_dir: str = DEFAULT_TICKS_ROOT, stats=None, now=None, *, fetcher=None, sleep_fn=None) -> dict:
     """
-    Poll Underdog's over_under_lines feed exactly ONCE, flatten it for every
-    stat key in `stats` (default: every key in MLB_PITCHER_STATS), and
-    append any genuinely new ticks to each affected game date's
-    `{processed_dir}/game_date=YYYY-MM-DD/ticks.csv`.
+    Poll Underdog's over_under_lines feed exactly ONCE (through a bounded
+    retry, see `_fetch_with_retry`), flatten it for every stat key in
+    `stats` (default: every key in MLB_PITCHER_STATS), and append any
+    genuinely new ticks to each affected game date's
+    `{output_dir}/game_date=YYYY-MM-DD/ticks.csv`.
 
-    `processed_dir`: the ticks-log root (default DEFAULT_TICKS_ROOT =
-    "data/raw/underdog_ticks"); tests point this at a tmp_path. See the
-    module docstring for why this parameter keeps the repo's conventional
-    name despite pointing at data/raw/, not data/processed/.
+    `output_dir`: the ticks-log root (default DEFAULT_TICKS_ROOT =
+    "data/raw/underdog_ticks"); tests point this at a tmp_path. The GitHub
+    Actions poller overrides this (via the CLI's --output-dir) to a
+    checked-out `data-ticks` branch working copy -- see
+    .github/workflows/tick-poller.yml.
     `stats`: iterable of Underdog stat keys to fan out to; None = all of
     MLB_PITCHER_STATS.
     `now`: injectable clock (a datetime); None = real UTC now. Matches this
     repo's dependency-injected-clock testing convention (src.evaluation.grading).
+    IMPORTANT: `now`/real-clock time is sampled AFTER the fetch (through all
+    retries) succeeds, never before -- `poll_at` must reflect when the data
+    was actually observed, not when polling started or was scheduled. This
+    matters most for the Actions poller, where cron can fire 15-60 minutes
+    late and a retry can add several more seconds; using a pre-fetch or
+    assumed/schedule time would silently corrupt every downstream
+    `minutes_before_first_pitch` / `close_quality` computation in
+    src/evaluation/clv.py.
     `fetcher`: injectable zero-arg callable returning the raw payload dict;
     None = the real fetch_over_under_lines(). Tests never touch the network.
+    `sleep_fn`: injectable sleep for the retry backoff; None = real
+    time.sleep. Tests never actually wait.
 
     Returns {"polled_at", "n_lines_seen", "n_rows_written", "n_games"}.
     Off-day / no games: still returns this summary (n_rows_written=0) and
     never raises -- a poller has no "fatal empty slate" case, unlike a
-    same-day prediction run.
+    same-day prediction run. A permanent 403 (`_is_permanent_403`) or an
+    exhausted retry budget both propagate as a raised exception -- that IS
+    fatal for this invocation, since it means no data was observed at all.
     """
+    stat_keys = list(stats) if stats else list(MLB_PITCHER_STATS)
+    _fetch = fetcher or fetch_over_under_lines
+    payload = _fetch_with_retry(_fetch, sleep_fn=sleep_fn)
+
     now_dt = now or datetime.now(timezone.utc)
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=timezone.utc)
     poll_at = now_dt.isoformat()
-
-    stat_keys = list(stats) if stats else list(MLB_PITCHER_STATS)
-    _fetch = fetcher or fetch_over_under_lines
-    payload = _fetch()
 
     n_lines_seen = 0
     rows_by_date = {}
@@ -300,7 +389,7 @@ def poll_once(processed_dir: str = DEFAULT_TICKS_ROOT, stats=None, now=None, *, 
 
     n_rows_written = 0
     for game_date, ticks in rows_by_date.items():
-        n_rows_written += _append_new_ticks(processed_dir, game_date, ticks)
+        n_rows_written += _append_new_ticks(output_dir, game_date, ticks)
 
     return {
         "polled_at": poll_at,
@@ -319,18 +408,28 @@ def main():
         description="Poll Underdog once and append genuinely new pitcher-prop "
                      "line ticks to today's game-date tick log(s)."
     )
-    parser.add_argument("--ticks-root", default=DEFAULT_TICKS_ROOT)
+    parser.add_argument(
+        "--output-dir", default=DEFAULT_TICKS_ROOT,
+        help="Ticks-log root to write under (default: data/raw/underdog_ticks). "
+             "The GitHub Actions poller points this at a data-ticks branch checkout.",
+    )
     parser.add_argument(
         "--stats", nargs="*", default=None,
         help="Underdog stat keys to poll (default: all of MLB_PITCHER_STATS)",
     )
     args = parser.parse_args()
 
-    summary = poll_once(args.ticks_root, stats=args.stats)
+    summary = poll_once(args.output_dir, stats=args.stats)
     print(
         f"Polled at {summary['polled_at']}: saw {summary['n_lines_seen']} line(s) "
         f"across {summary['n_games']} game(s); wrote {summary['n_rows_written']} new tick row(s)."
     )
+    # Machine-readable line for the GitHub Actions poller's run-summary step
+    # (see .github/workflows/tick-poller.yml) -- avoids parsing the
+    # human-readable line above. n_rows_written IS "lines whose updated_at
+    # changed since the previous poll": a row is only ever written when the
+    # dedupe key (over_under_id, over_updated_at, under_updated_at) is new.
+    print(f"SUMMARY_JSON:{json.dumps(summary)}")
 
 
 if __name__ == "__main__":

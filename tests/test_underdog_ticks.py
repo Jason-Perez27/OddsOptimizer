@@ -230,3 +230,131 @@ def test_poll_once_fans_out_to_multiple_stats_from_a_single_fetch(tmp_path):
     assert summary["n_lines_seen"] == 2  # one strikeouts line + one walks_allowed line
     assert summary["n_rows_written"] == 2
     assert summary["n_games"] == 1  # both lines are the same game (m-1)
+
+
+# ---------------------------------------------------------------------------
+# Bounded retry (GitHub Actions hardening)
+# ---------------------------------------------------------------------------
+
+def test_fetch_with_retry_succeeds_after_transient_failures():
+    calls = {"n": 0}
+    sleeps = []
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("transient blip")
+        return {"ok": True}
+
+    result = underdog_ticks._fetch_with_retry(flaky, sleep_fn=sleeps.append)
+
+    assert result == {"ok": True}
+    assert calls["n"] == 3
+    # Two failures before the success -> two backoff sleeps, first two delays.
+    assert sleeps == [2, 4]
+
+
+def test_fetch_with_retry_exhausts_budget_and_raises_last_error():
+    calls = {"n": 0}
+    sleeps = []
+
+    def always_fails():
+        calls["n"] += 1
+        raise ConnectionError(f"blip {calls['n']}")
+
+    with pytest.raises(ConnectionError, match="blip 4"):
+        underdog_ticks._fetch_with_retry(always_fails, sleep_fn=sleeps.append)
+
+    # 1 initial attempt + 3 retries = 4 total attempts, all three delays used.
+    assert calls["n"] == 4
+    assert sleeps == [2, 4, 8]
+
+
+def test_fetch_with_retry_never_retries_a_403():
+    calls = {"n": 0}
+    sleeps = []
+
+    def rejected():
+        calls["n"] += 1
+        raise RuntimeError("Underdog rejected the request (403) -- endpoint shape may have changed")
+
+    with pytest.raises(RuntimeError, match="403"):
+        underdog_ticks._fetch_with_retry(rejected, sleep_fn=sleeps.append)
+
+    assert calls["n"] == 1  # no retries at all
+    assert sleeps == []
+
+
+def test_fetch_with_retry_never_retries_a_403_style_requests_exception():
+    class FakeResponse:
+        status_code = 403
+
+    class FakeHTTPError(Exception):
+        def __init__(self):
+            super().__init__("403 Client Error")
+            self.response = FakeResponse()
+
+    calls = {"n": 0}
+
+    def rejected():
+        calls["n"] += 1
+        raise FakeHTTPError()
+
+    with pytest.raises(Exception):
+        underdog_ticks._fetch_with_retry(rejected, sleep_fn=lambda s: None)
+
+    assert calls["n"] == 1
+
+
+def test_poll_once_retries_transient_fetch_failure_then_succeeds(tmp_path):
+    payload = _payload([
+        _line("l1", "ou-1", "strikeouts", "6.5", "2026-08-23T23:05:00Z",
+              "2026-08-23T14:00:00Z", "2026-08-23T14:00:00Z"),
+    ])
+    calls = {"n": 0}
+
+    def flaky_fetcher():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise ConnectionError("transient blip")
+        return payload
+
+    summary = underdog_ticks.poll_once(
+        str(tmp_path), fetcher=flaky_fetcher, sleep_fn=lambda s: None,
+    )
+
+    assert calls["n"] == 2
+    assert summary["n_rows_written"] == 1
+
+
+# ---------------------------------------------------------------------------
+# poll_at reflects when the fetch actually succeeded, never a pre-fetch time
+# ---------------------------------------------------------------------------
+
+def test_poll_at_is_captured_after_fetch_succeeds_not_before():
+    """
+    With no injected `now`, poll_once must sample the real clock AFTER the
+    (possibly retried) fetch returns -- never before it starts. We prove
+    ordering, not just a plausible value, by recording the order in which
+    the fetch and the clock read happen.
+    """
+    order = []
+
+    class RecordingDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            order.append("clock_read")
+            return super().now(tz)
+
+    def fetcher():
+        order.append("fetch")
+        return {"over_under_lines": [], "appearances": [], "players": [], "games": [], "solo_games": []}
+
+    original_datetime = underdog_ticks.datetime
+    underdog_ticks.datetime = RecordingDatetime
+    try:
+        underdog_ticks.poll_once("/tmp/unused-does-not-matter", fetcher=fetcher)
+    finally:
+        underdog_ticks.datetime = original_datetime
+
+    assert order == ["fetch", "clock_read"]
