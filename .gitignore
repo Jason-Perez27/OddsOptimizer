@@ -1,8 +1,9 @@
 # OddsOptimizer project-specific
-data/
+/data/
 *.csv
 *.parquet
 configs/secrets.yaml
+daily_results.html
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
