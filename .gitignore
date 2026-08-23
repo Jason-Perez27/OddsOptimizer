@@ -223,3 +223,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local staging area for files pending manual deletion (created by an
+# assistant session that could not delete directly on this device).
+_to_delete/
