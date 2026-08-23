@@ -4,7 +4,7 @@ probable-pitcher hydration.
 
 Design: docs/design/specs/2026-06-27-pre-game-refresh-pipeline-design.md
 (task #9). One external source, one ingestion module -- parallel to
-src/data/pitcher_logs.py and src/data/prizepicks_lines.py: a thin live
+src/data/pitcher_logs.py and src/data/underdog_lines.py: a thin live
 fetch_schedule() plus a pure, testable parse_probable_starters().
 
 Why this module exists: every other module in the project either operates on

@@ -124,9 +124,29 @@ def _opp_html(row):
     return "".join(items)
 
 
-def _odds_type_tag(ot):
-    cls = {"standard": "ot-standard", "goblin": "ot-goblin", "demon": "ot-demon"}.get(ot, "ot-unknown")
-    return f'<span class="odds-type-tag {cls}">{ot or "?"}</span>'
+def _fmt_american(v):
+    v = int(round(v))
+    return f"+{v}" if v > 0 else str(v)
+
+
+def _market_price_tag(pick: dict) -> str:
+    """
+    Underdog posts a two-sided over/under line (no odds_type ladder to badge
+    any more -- see tiering.py's 2026-08 migration). Show the two American
+    prices plus the no-vig market probability instead.
+    """
+    over_am = pick.get("over_american")
+    under_am = pick.get("under_american")
+    has_over = over_am is not None and not (isinstance(over_am, float) and math.isnan(over_am))
+    has_under = under_am is not None and not (isinstance(under_am, float) and math.isnan(under_am))
+    if not (has_over and has_under):
+        return '<span class="odds-type-tag ot-unknown">no line</span>'
+
+    label = f"O {_fmt_american(over_am)} / U {_fmt_american(under_am)}"
+    p_market = pick.get("p_market")
+    if p_market is not None and not (isinstance(p_market, float) and math.isnan(p_market)):
+        label += f" · mkt {p_market * 100:.0f}%"
+    return f'<span class="odds-type-tag ot-priced">{label}</span>'
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +157,6 @@ def _render_card(pick: dict, card: dict) -> str:
     lean    = pick.get("lean", "")
     p_over  = pick.get("p_over", 0.0) or 0.0
     p_under = pick.get("p_under", 0.0) or 0.0
-    edge    = pick.get("edge", 0.0) or 0.0
     tier    = pick.get("tier", "low")
     line    = pick.get("line", 0)
     action  = pick.get("actionability", "no_action")
@@ -150,10 +169,25 @@ def _render_card(pick: dict, card: dict) -> str:
     )
     bar_cls  = "bar-over" if lean == "over" else "bar-under"
     bar_w    = round(p_over * 100)
-    edge_str = ("+" if edge >= 0 else "") + f"{edge*100:.1f}%"
+
+    # edge is p_over - p_market (no-vig, two-sided) when a market price was
+    # matched; falls back to edge_vs_coinflip (p_over - 0.5) when it wasn't
+    # -- see tiering.build_line_picks. Label reflects which one is showing.
+    edge = pick.get("edge")
+    has_edge = edge is not None and not (isinstance(edge, float) and math.isnan(edge))
+    if has_edge:
+        edge_label = "Edge vs market"
+        edge_str = ("+" if edge >= 0 else "") + f"{edge*100:.1f}%"
+    else:
+        edge_label = "Edge vs coinflip (no market)"
+        fallback = pick.get("edge_vs_coinflip") or 0.0
+        edge_str = ("+" if fallback >= 0 else "") + f"{fallback*100:.1f}%"
+
+    # actionability is "no_action" / "lean_over" / "lean_under" (tiering.py) --
+    # there is no "actionable" value; any lean_* is the actionable case.
     act_badge = (
-        '<span class="action-badge act-yes">✓ Actionable</span>' if action == "actionable"
-        else '<span class="action-badge act-no">— No action</span>'
+        '<span class="action-badge act-no">— No action</span>' if action == "no_action"
+        else '<span class="action-badge act-yes">✓ Actionable</span>'
     )
 
     weather = _weather_badge(card)
@@ -172,7 +206,7 @@ def _render_card(pick: dict, card: dict) -> str:
 
     return f"""
     <div class="card">
-      <div class="pitcher-name">{pick.get("pitcher_name", "?")} {_odds_type_tag(pick.get("odds_type"))}</div>
+      <div class="pitcher-name">{pick.get("pitcher_name", "?")} {_market_price_tag(pick)}</div>
       <div class="team">{pick.get("team", "?")} vs {card.get("opponent_team", "?")} · μ={mu_str} K</div>
       {f'<div class="top-meta">{top_meta}</div>' if top_meta else ""}
       <div class="line-row">
@@ -184,7 +218,7 @@ def _render_card(pick: dict, card: dict) -> str:
       <div class="stats">
         <div class="stat-item"><span class="stat-label">P(over) </span><span class="stat-val">{p_over*100:.1f}%</span></div>
         <div class="stat-item"><span class="stat-label">P(under) </span><span class="stat-val">{p_under*100:.1f}%</span></div>
-        <div class="stat-item"><span class="stat-label">Edge </span><span class="stat-val">{edge_str}</span></div>
+        <div class="stat-item"><span class="stat-label">{edge_label} </span><span class="stat-val">{edge_str}</span></div>
         <div class="stat-item"><span class="stat-label">Push mass </span><span class="stat-val">{_pct(pick.get("push_mass"))}</span></div>
         {conv_html}
         {skill}
@@ -239,11 +273,9 @@ CSS = """
   .card .stat-val   { color: #cbd5e1; font-weight: 600; }
 
   .odds-type-tag { font-size: 0.65rem; font-weight: 700; padding: 1px 6px; border-radius: 3px;
-                   text-transform: uppercase; margin-left: 4px; }
-  .ot-standard { background: #1e3a5f; color: #60a5fa; }
-  .ot-goblin   { background: #1a2e1a; color: #86efac; }
-  .ot-demon    { background: #3b1f1f; color: #fca5a5; }
-  .ot-unknown  { background: #1e293b; color: #94a3b8; }
+                   text-transform: none; margin-left: 4px; }
+  .ot-priced   { background: #1e3a5f; color: #60a5fa; }
+  .ot-unknown  { background: #1e293b; color: #94a3b8; text-transform: uppercase; }
 
   .env-badge { display: inline-block; font-size: 0.68rem; font-weight: 600;
                padding: 2px 6px; border-radius: 4px; }

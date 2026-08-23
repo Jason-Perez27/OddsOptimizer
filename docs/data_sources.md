@@ -28,7 +28,7 @@ All sources below are free for this project's scale. None require payment. Anyth
 - **Use responsibly:** personal/research use only, consistent with this repo's disclaimer — not a commercial scraping operation.
 
 ### PrizePicks (decommissioned, 2026-06-27 – 2026-08)
-PrizePicks was the original line source. It was replaced after its public projections endpoint began permanently returning HTTP 403 (DataDome bot protection), and — separately — after it replaced its standard/goblin/demon ladder with unpublished-payout two-sided alternates that no longer fit this project's fixed-payout edge calculation. See `docs/decision_log.md` for the full history; `src/data/prizepicks_lines.py` is kept, unmodified, purely as a historical record and is no longer imported anywhere in the pipeline.
+PrizePicks was the original line source. It was replaced after its public projections endpoint began permanently returning HTTP 403 (DataDome bot protection), and — separately — after it replaced its standard/goblin/demon ladder with unpublished-payout two-sided alternates that no longer fit this project's fixed-payout edge calculation. See `docs/decision_log.md` for the full history. The old `src/data/prizepicks_lines.py` module itself has been removed from the codebase — git history is the historical record — since nothing imported it and a dead, unreachable module in `src/data/` was more confusing than useful.
 
 ## What is explicitly out of scope for now
 

@@ -97,7 +97,6 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 ### `src/data/` — ingestion
 
 - **`underdog_lines.py`** — the live line source. `fetch_over_under_lines(sport_id="MLB")` calls Underdog's public pick'em feed; `flatten_lines(payload, stat, sport_id)` joins the nested `over_under_lines → appearances → players + games` payload into one row per line with both sides' American odds and payout multipliers; `american_to_prob`, `no_vig_two_way`, and `payout_to_decimal` are the shared odds-conversion helpers used downstream for market pricing. Feeds the tiering/edge stage of `src/pipeline/refresh.py`.
-- **`prizepicks_lines.py`** — decommissioned (2026-08). Kept as a historical record only; nothing in the pipeline imports it anymore.
 - **`pitcher_logs.py`** — pulls a pitcher's season-to-date Statcast pitch logs via `pybaseball` (`get_pitcher_season_logs`, plus an id-based `get_pitcher_logs_by_id` used for settlement). Raw output feeds `src/features/game_logs.py`.
 - **`probable_pitchers.py`** — fetches today's probable starters from MLB-StatsAPI (`fetch_schedule` + `parse_probable_starters`), answering "who's starting, for which team, against whom." Its slate output is the direct input to `src/features/predict_features.py`.
 - **`statsapi_boxscore.py`** — pulls earned-runs-allowed labels from the StatsAPI boxscore (`get_pitcher_earned_runs_by_game`), since Statcast pitch data doesn't distinguish earned from unearned runs. Feeds the ER-rate rolling features.
@@ -157,7 +156,8 @@ Read in pipeline order — each subsection is roughly "what comes in, what comes
 - **`run_compression_fix_gate.py`** / **`run_compression_fix_v2_gate.py`** — walk-forward gates that test a candidate feature-set change against the production baseline and adopt/reject it by a fixed rule (see the rejected compression-fix result in Results above).
 - **`compare_skill_features.py`** — a similar gate for a plate-discipline candidate feature set, with an AST-based tool to promote accepted columns into `baseline_model.py` automatically.
 - **`install_cadences.ps1`** — registers the four cadences above in Windows Task Scheduler.
-- **`diagnose_live_sources.py`** and **`generate_daily_html.py`** — both predate the Underdog migration and have not yet been updated: the former still names and queries PrizePicks endpoints, and the latter still renders the old odds-type (standard/goblin/demon) badge scheme and an `actionability` vocabulary that no longer matches `tiering.py`'s current output. Useful as a starting point, not currently reliable as-is — worth fixing before relying on either.
+- **`diagnose_live_sources.py`** — one-off triage tool for `refresh --dry-run` failures; `diagnose_underdog()` hits the raw Underdog feed and prints HTTP status, MLB game count, distinct stats present, and a full sample line, `diagnose_statsapi()` does the same for the StatsAPI schedule.
+- **`generate_daily_html.py`** — renders `pitcher_cards.csv` + `line_picks.csv` into a static `daily_results.html` card view: two-sided prices and no-vig market probability per pitcher (`_market_price_tag`), edge labeled against the market (falling back to vs-coinflip when a line wasn't matched), and an actionable/no-action badge driven by `tiering.py`'s actual `actionability` values (`lean_over`/`lean_under`/`no_action`).
 
 ## Status
 

@@ -8,7 +8,7 @@ Verifies:
 - Prop fields are internally consistent (label_source, statcast_event, etc.).
 - The registry refactor is behaviour-preserving: the strikeout pipeline
   reads the same model path, stat_type, and thresholds as the hardcoded
-  values in baseline_model.py and prizepicks_lines.py (contract guard).
+  values in baseline_model.py and underdog_lines.py (contract guard).
 
 Run with: pytest tests/test_props.py -v
 """

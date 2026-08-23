@@ -1,8 +1,8 @@
 """
 Unit tests for src/data/underdog_lines.py.
 
-Strategy (matches tests/test_prizepicks_lines.py's conventions): no real
-network calls -- requests.get is mocked throughout. Underdog's endpoint is
+Strategy (matches this project's existing fixture-based testing convention):
+no real network calls -- requests.get is mocked throughout. Underdog's endpoint is
 public but unofficial, so these tests pin down our own join/parsing logic
 against a hand-built fixture payload matching the verified contract (see the
 module docstring), not against the live API.

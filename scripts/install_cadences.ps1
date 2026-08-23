@@ -19,8 +19,13 @@
 # subtract one hour. Set the START_TIME_* variables below to YOUR LOCAL times.
 #
 # The constraint that matters (from the runbook):
-#   A must fire AFTER Underdog posts lines + StatsAPI has probables (~09:00 ET)
-#     and BEFORE first pitches (~13:05 ET). 10:00 ET is the recommended target.
+#   A must fire AFTER StatsAPI has probables (~09:00 ET) and BEFORE first
+#     pitches (~13:05 ET). 10:00 ET is the recommended target. StatsAPI
+#     probables -- not the line source -- is the binding dependency here:
+#     Underdog posts the MLB slate the night before (verified growing from a
+#     handful of games around 21:45 ET to the full slate by ~23:00 ET), so by
+#     game-day morning its lines are already up; StatsAPI's probable-pitcher
+#     hydration is what isn't confirmed until closer to first pitch.
 #   B must fire AFTER overnight Statcast finalizes (~11:00 ET). 12:00 ET target.
 #   C (weekly) fires before the 7-day staleness warning trips. Monday 08:00 ET.
 #   D (weekly) fires after B on the same day. Monday 12:30 ET.

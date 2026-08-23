@@ -2,8 +2,8 @@
 One-off diagnostic for the go-live verification gate (task #12) FAILing.
 
 Not part of the daily/weekly cadence -- a throwaway triage tool to inspect the
-*real* PrizePicks and StatsAPI payload shapes when `refresh --dry-run` fails,
-so the parser fix in src/data/prizepicks_lines.py / src/data/probable_pitchers.py
+*real* Underdog and StatsAPI payload shapes when `refresh --dry-run` fails,
+so the parser fix in src/data/underdog_lines.py / src/data/probable_pitchers.py
 is based on evidence, not a second guess.
 
 Usage:
@@ -16,42 +16,48 @@ import sys
 
 import requests
 
+UNDERDOG_SPORT_ID = "MLB"
 
-def diagnose_prizepicks():
+
+def diagnose_underdog():
     print("=" * 70)
-    print("PRIZEPICKS")
+    print("UNDERDOG")
     print("=" * 70)
 
-    base = "https://api.prizepicks.com"
+    base = "https://api.underdogfantasy.com"
     headers = {"User-Agent": "Mozilla/5.0 (OddsOptimizer research project)"}
 
-    print("\n--- GET /leagues (find MLB's real league id) ---")
-    try:
-        resp = requests.get(f"{base}/leagues", headers=headers, timeout=15)
-        print(f"HTTP {resp.status_code}")
-        leagues = resp.json().get("data", [])
-        for lg in leagues:
-            name = lg.get("attributes", {}).get("name", "")
-            if "mlb" in name.lower() or "baseball" in name.lower():
-                print(f"  id={lg.get('id')}  name={name!r}")
-    except Exception as exc:
-        print(f"  ERROR: {exc}")
-
-    print("\n--- GET /projections?league_id=2 (current assumed MLB id) ---")
+    print(f"\n--- GET /beta/v6/over_under_lines?sport_id={UNDERDOG_SPORT_ID} ---")
     try:
         resp = requests.get(
-            f"{base}/projections", params={"league_id": 2, "per_page": 250},
+            f"{base}/beta/v6/over_under_lines", params={"sport_id": UNDERDOG_SPORT_ID},
             headers=headers, timeout=15,
         )
         print(f"HTTP {resp.status_code}")
         payload = resp.json()
-        data = payload.get("data", [])
-        print(f"  {len(data)} projection(s) total for league_id=2")
-        stat_types = sorted({d.get("attributes", {}).get("stat_type") for d in data})
-        print(f"  distinct stat_type values present: {stat_types}")
-        if data:
-            print("\n  Sample raw projection 'attributes' (first row):")
-            print(json.dumps(data[0].get("attributes", {}), indent=2, default=str))
+        lines = payload.get("over_under_lines", []) or []
+        games = payload.get("games", []) or []
+        mlb_games = [g for g in games if g.get("sport_id") == UNDERDOG_SPORT_ID]
+        print(f"  {len(mlb_games)} MLB game(s) (of {len(games)} game(s) in the payload)")
+
+        stat_values = sorted({
+            (line.get("over_under", {}) or {}).get("appearance_stat", {}).get("stat")
+            for line in lines
+        } - {None})
+        print(f"  distinct appearance_stat.stat values present: {stat_values}")
+
+        if lines:
+            sample = lines[0]
+            options = sample.get("options", []) or []
+            print("\n  Sample raw line (first row) -- both options entries:")
+            print(json.dumps(sample, indent=2, default=str))
+            print("\n  Sample line's two options, american_price / payout_multiplier only:")
+            for opt in options:
+                print(
+                    f"    choice={opt.get('choice')!r}  "
+                    f"american_price={opt.get('american_price')!r}  "
+                    f"payout_multiplier={opt.get('payout_multiplier')!r}"
+                )
     except Exception as exc:
         print(f"  ERROR: {exc}")
 
@@ -102,7 +108,7 @@ def main():
     parser.add_argument("--date", required=True, help="YYYY-MM-DD")
     args = parser.parse_args()
 
-    diagnose_prizepicks()
+    diagnose_underdog()
     diagnose_statsapi(args.date)
 
 
